@@ -39,14 +39,26 @@ spec:
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: /
-              port: http
+              path: /liveness
+              port: 8000
           readinessProbe:
             httpGet:
-              path: /
-              port: http
+              path: /readiness
+              port: 8000
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/assist-config
+            - name: secret
+              mountPath: /etc/assist-secret
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "gitea-assist.fullname" . }}
+        - name: secret
+          secret:
+            secretName: {{ .Values.config.secrets.creds }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

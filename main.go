@@ -1,11 +1,12 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"code.gitea.io/gitea/modules/structs"
 	api "code.gitea.io/gitea/modules/structs"
@@ -25,13 +26,13 @@ func init() {
 func getCreds() (*Creds, error) {
 	var creds *Creds
 
-	username, err := os.ReadFile("/etc/secrets/username")
+	username, err := os.ReadFile("/etc/assist-secret/gitea-username")
 	if err != nil {
 		log.Fatalf("Error reading username: %v", err)
 		return creds, err
 	}
 
-	password, err := os.ReadFile("/etc/secrets/password")
+	password, err := os.ReadFile("/etc/assist-secret/gitea-password")
 	if err != nil {
 		log.Fatalf("Error reading password: %v", err)
 		return creds, err
@@ -58,16 +59,29 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("could not retrieve forks %u", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&forks)
+
+	if err != nil {
+		log.Printf("unable to parse response from /forks %u", err)
+		body, err := io.ReadAll(resp.Body)
+		log.Printf("body:\n %s", body)
+		return nil, err
+	}
 
 	return forks, nil
 }
 
 func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 	// 1. Get the repository related to the push event
-	repoURL := pushEvent.Repo.HTMLURL
+	languagesURL := pushEvent.Repo.LanguagesURL
+	repoURL := strings.ReplaceAll(languagesURL, "/languages", "")
+	log.Printf("processing push event on repo with URL %s", repoURL)
 
 	// 2. Find all forks of the repository (requires Gitea API call)
 
@@ -76,9 +90,9 @@ func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 
 	// 4. Log or handle any errors or issues that arise
 
-	if forks, err := findForks(repoURL, creds.Username, creds.Password); err != nil {
+	if forks, err := findForks(repoURL, creds.Username, creds.Password); err == nil {
 		for _, fork := range forks {
-			fmt.Printf("found %u", fork.Name)
+			log.Printf("found fork %s", fork.Name)
 		}
 	}
 }
@@ -102,13 +116,27 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	// Process the push event, including finding forks and pulling changes
 	processPushEvent(pushEvent, creds)
 
-	fmt.Fprintf(w, "OK")
+	log.Printf("OK")
+}
+
+func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	// Check conditions to determine if service is ready to handle requests.
+	// For simplicity, we're always returning 200 OK in this example.
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Ready"))
+}
+
+func livenessHandler(w http.ResponseWriter, r *http.Request) {
+	// Check conditions to determine if service is alive and healthy.
+	// For simplicity, we're always returning 200 OK in this example.
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Alive"))
 }
 
 func main() {
-	if creds != nil {
-		http.HandleFunc("/onPush", webhookHandler)
-		log.Println("Server started on :8080")
-		log.Fatal(http.ListenAndServe(":8080", nil))
-	}
+	http.HandleFunc("/onPush", webhookHandler)
+	http.HandleFunc("/readiness", readinessHandler)
+	http.HandleFunc("/liveness", livenessHandler)
+	log.Println("Server started on :8000")
+	log.Fatal(http.ListenAndServe(":8000", nil))
 }
