@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/modules/structs"
 	api "code.gitea.io/gitea/modules/structs"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -26,16 +25,16 @@ type Creds struct {
 }
 
 type MergeContext struct {
-	Origin         *git.Repository
-	OriginCloneURL string
-	OriginName     string
-	OriginBranch   string
-	OriginHash     *plumbing.Hash
-	Fork           *git.Repository
-	ForkCloneURL   string
-	ForkName       string
-	ForkBranch     string
-	ForkHash       *plumbing.Hash
+	Upstream         *git.Repository
+	UpstreamCloneURL string
+	UpstreamName     string
+	UpstreamBranch   string
+	UpstreamHash     *plumbing.Hash
+	Fork             *git.Repository
+	ForkCloneURL     string
+	ForkName         string
+	ForkBranch       string
+	ForkHash         *plumbing.Hash
 }
 
 var creds *Creds
@@ -80,7 +79,7 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("could not retrieve forks %u", err)
+		log.Printf("could not retrieve forks %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -89,7 +88,7 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 	err = dec.Decode(&forks)
 
 	if err != nil {
-		log.Printf("unable to parse response from /forks %u", err)
+		log.Printf("unable to parse response from /forks %v", err)
 		body, err := io.ReadAll(resp.Body)
 		log.Printf("body:\n %s", body)
 		return nil, err
@@ -125,7 +124,7 @@ func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
 	// Add the original repo as an upstream remote
 	_, err := mc.Fork.CreateRemote(&config.RemoteConfig{
 		Name: "upstream",
-		URLs: []string{mc.OriginCloneURL},
+		URLs: []string{mc.UpstreamCloneURL},
 	})
 	if err != nil && err != git.ErrRemoteExists {
 		return nil, err
@@ -140,7 +139,7 @@ func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
 	}
 
 	// Get the commits for the branches
-	upstreamRef, err := mc.Fork.Reference(plumbing.ReferenceName("refs/remotes/upstream/"+mc.OriginBranch), true)
+	upstreamRef, err := mc.Fork.Reference(plumbing.ReferenceName("refs/remotes/upstream/"+mc.UpstreamBranch), true)
 	if err != nil {
 		return nil, err
 	}
@@ -168,10 +167,10 @@ func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
 		return nil, err
 	}
 
-	mc.OriginHash = &upstreamHash
+	mc.UpstreamHash = &upstreamHash
 	mc.ForkHash = &forkHash
 
-	log.Printf("Collected diffs between %s and %s", mc.OriginName, mc.ForkName)
+	log.Printf("Collected diffs between %s and %s", mc.UpstreamName, mc.ForkName)
 
 	return diff, nil
 }
@@ -205,7 +204,6 @@ func readFileContents(wt *git.Worktree, df diff.File) ([]byte, *os.FileMode, err
 	}
 	mode := stat.Mode()
 
-	//err := ioutil.WriteFile(repoPath+"/"+to.Path(), content, 0644)
 	contents, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatalf("Failed to read file %s: %s", df.Path(), err)
@@ -215,15 +213,14 @@ func readFileContents(wt *git.Worktree, df diff.File) ([]byte, *os.FileMode, err
 }
 
 func writeContents(wt *git.Worktree, df diff.File, contents []byte, mode *os.FileMode) error {
-	file, err := wt.Filesystem.OpenFile(df.Path(), os.O_CREATE|os.O_RDWR, *mode)
+	file, err := wt.Filesystem.OpenFile(df.Path(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, *mode)
 	if err != nil {
 		log.Fatalf("Failed to open file %s: %s", df.Path(), err)
 		return err
 	}
 	defer file.Close()
-
 	if _, err := file.Write(contents); err != nil {
-		log.Fatalf("Failed to read file %s: %s", df.Path(), err)
+		log.Fatalf("Failed to write file %s: %s", df.Path(), err)
 		return err
 	}
 	return nil
@@ -236,7 +233,7 @@ func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 	if err != nil {
 		return err
 	}
-	wtOrigin, err := mc.Origin.Worktree()
+	wtUpstream, err := mc.Upstream.Worktree()
 	if err != nil {
 		return err
 	}
@@ -252,15 +249,13 @@ func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 				return err
 			}
 		} else {
-			contents, mode, err := readFileContents(wtOrigin, to)
+			contents, mode, err := readFileContents(wtUpstream, to)
 			if err != nil {
 				log.Fatalf("Failed to read file %s from worktree: %s", to.Path(), err)
 			}
-
 			if err = writeContents(wtFork, to, contents, mode); err != nil {
 				log.Fatalf("Failed to write new file %s to worktree: %s", to.Path(), err)
 			}
-
 			if _, err := wtFork.Add(to.Path()); err != nil {
 				log.Fatalf("Failed to add file %s to worktree: %s", to.Path(), err)
 				return err
@@ -271,17 +266,17 @@ func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 	// Commit the changes to the fork repository.
 	options := git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Mr McMergeybot",
+			Name:  "Mr McMergybot",
 			Email: "merge-botCMXX@renci.org",
 			When:  time.Now(),
 		},
-		Parents: []plumbing.Hash{*mc.OriginHash, *mc.ForkHash},
+		Parents: []plumbing.Hash{*mc.UpstreamHash, *mc.ForkHash},
 	}
-	if _, err = wtFork.Commit("Merge changes from "+mc.OriginName, &options); err != nil {
-		log.Printf("Failed to merge %s and %s: %v", mc.OriginName, mc.ForkName, err)
+	if _, err = wtFork.Commit("Merge changes from "+mc.UpstreamName, &options); err != nil {
+		log.Printf("Failed to merge %s and %s: %v", mc.UpstreamName, mc.ForkName, err)
 		return err
 	} else {
-		log.Printf("Merged changes from %s into %s", mc.OriginName, mc.ForkName)
+		log.Printf("Merged changes from %s into %s", mc.UpstreamName, mc.ForkName)
 	}
 
 	return nil
@@ -332,9 +327,9 @@ func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 		for _, fork := range forks {
 			log.Printf("found fork %s", fork.Owner.UserName+"/"+fork.Name)
 			if pushRepo == nil {
-				pushRepo, err = cloneRepoIntoDir("/tmp/repos/", "origin/"+pushEvent.Repo.Name, pushEvent.Repo.CloneURL)
+				pushRepo, err = cloneRepoIntoDir("/tmp/repos/", "upstream/"+pushEvent.Repo.Name, pushEvent.Repo.CloneURL)
 				if err != nil {
-					log.Printf("Failed to clone the origin repository: %v", err)
+					log.Printf("Failed to clone the upstream repository: %v", err)
 					return
 				}
 			}
@@ -345,20 +340,20 @@ func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 			}
 
 			mc := &MergeContext{
-				Origin:         pushRepo,
-				OriginCloneURL: pushEvent.Repo.CloneURL,
-				OriginName:     "origin/" + pushEvent.Repo.Name,
-				OriginBranch:   pushEvent.Branch(),
-				Fork:           forkRepo,
-				ForkCloneURL:   fork.CloneURL,
-				ForkName:       fork.Owner.UserName + "/" + fork.Name,
-				ForkBranch:     pushEvent.Branch(),
+				Upstream:         pushRepo,
+				UpstreamCloneURL: pushEvent.Repo.CloneURL,
+				UpstreamName:     "upstream/" + pushEvent.Repo.Name,
+				UpstreamBranch:   pushEvent.Branch(),
+				Fork:             forkRepo,
+				ForkCloneURL:     fork.CloneURL,
+				ForkName:         fork.Owner.UserName + "/" + fork.Name,
+				ForkBranch:       pushEvent.Branch(),
 			}
 			if diff, err := getDiffBetweenUpstreamAndFork(mc); err == nil {
 				if err = processMerge(mc, diff.FilePatches()); err == nil {
 					pushFork(mc, creds)
 				} else {
-					log.Printf("failed to process merge of %s into %s", mc.OriginName, mc.ForkName)
+					log.Printf("failed to process merge of %s into %s", mc.UpstreamName, mc.ForkName)
 				}
 			} else {
 				log.Printf("failed to compute upstream and fork diff")
@@ -375,7 +370,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pushEvent, err := structs.ParsePushHook(body)
+	pushEvent, err := api.ParsePushHook(body)
 
 	if err != nil {
 		log.Printf("Error parsing body: %v", err)

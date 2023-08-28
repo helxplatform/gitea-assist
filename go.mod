@@ -2,10 +2,7 @@ module gitea_assist
 
 go 1.20
 
-require (
-	code.gitea.io/gitea v1.20.2
-	github.com/go-git/go-git v4.7.0+incompatible
-)
+require code.gitea.io/gitea v1.20.2
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
@@ -22,14 +19,12 @@ require (
 	github.com/pjbgf/sha1cd v0.3.0 // indirect
 	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/skeema/knownhosts v1.2.0 // indirect
-	github.com/src-d/gcfg v1.4.0 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	golang.org/x/crypto v0.11.0 // indirect
 	golang.org/x/mod v0.10.0 // indirect
 	golang.org/x/net v0.12.0 // indirect
 	golang.org/x/sys v0.10.0 // indirect
 	golang.org/x/tools v0.8.0 // indirect
-	gopkg.in/src-d/go-git.v4 v4.13.1 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 
