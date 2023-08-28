@@ -404,9 +404,10 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/onPush", webhookHandler)
-	http.HandleFunc("/readiness", readinessHandler)
-	http.HandleFunc("/liveness", livenessHandler)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/onPush", webhookHandler)
+	mux.HandleFunc("/readiness", readinessHandler)
+	mux.HandleFunc("/liveness", livenessHandler)
 	log.Println("Server started on :8000")
-	log.Fatal(http.ListenAndServe(":8000", nil))
+	log.Fatal(http.ListenAndServe(":8000", mux))
 }
