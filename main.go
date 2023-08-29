@@ -43,6 +43,9 @@ func init() {
 	creds, _ = getCreds()
 }
 
+// getCreds retrieves Gitea credentials (username and password) from
+// specified files in the system. It returns a pointer to a Creds
+// structure and an error if there's an issue reading the files.
 func getCreds() (*Creds, error) {
 	var creds *Creds
 
@@ -66,6 +69,10 @@ func getCreds() (*Creds, error) {
 	return creds, nil
 }
 
+// findForks retrieves a list of forks for a given repository URL using
+// basic authentication with the provided username and password. The
+// function returns a slice of api.Repository representing the forks and
+// an error if there's an issue with the HTTP request or response parsing.
 func findForks(repoURL, username, password string) ([]api.Repository, error) {
 	var forks []api.Repository
 
@@ -97,6 +104,11 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 	return forks, nil
 }
 
+// cloneRepoIntoDir clones a given Git repository into a specified directory.
+// If the parent directory doesn't exist, it's created. The function takes the
+// parent directory path, desired repository name for the clone, and the clone
+// URL as input. It returns a pointer to the cloned git.Repository and an error
+// if there's an issue with directory creation or the cloning process.
 func cloneRepoIntoDir(parentDir, repoName, cloneURL string) (*git.Repository, error) {
 	// Check if the parent directory exists. If not, create it.
 	if _, err := os.Stat(parentDir); os.IsNotExist(err) {
@@ -120,6 +132,13 @@ func cloneRepoIntoDir(parentDir, repoName, cloneURL string) (*git.Repository, er
 	return repo, err
 }
 
+// getDiffBetweenUpstreamAndFork calculates the diff between an upstream Git
+// repository and its fork. It sets the original repo as an "upstream" remote,
+// fetches from the upstream, retrieves commits for specified branches, and
+// calculates the diff between them. The function operates within a given
+// MergeContext (mc) containing details about repositories, branches, etc.
+// It returns the calculated diff as an *object.Patch and an error if issues
+// arise during the process.
 func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
 	// Add the original repo as an upstream remote
 	_, err := mc.Fork.CreateRemote(&config.RemoteConfig{
@@ -175,7 +194,11 @@ func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
 	return diff, nil
 }
 
-// filterPatches filters out the FilePatches that represent merge conflicts.
+// filterPatches filters the given list of file patches based on criteria.
+// Currently, all patches are returned without filtering, but there's a TODO
+// to filter out patches representing merge conflicts. The function operates
+// within the context of a given MergeContext (mc) and returns a slice of
+// diff.FilePatch with the filtered patches.
 func filterPatches(mc *MergeContext, filePatches []diff.FilePatch) []diff.FilePatch {
 	filteredPatches := make([]diff.FilePatch, 0)
 
@@ -189,6 +212,11 @@ func filterPatches(mc *MergeContext, filePatches []diff.FilePatch) []diff.FilePa
 	return filteredPatches
 }
 
+// readFileContents reads the contents of a specified file from a Git worktree
+// and retrieves its mode. The function takes a pointer to the git.Worktree and
+// a diff.File representing the file. It returns the contents as a byte slice, a
+// pointer to the file mode (os.FileMode), and an error if there's an issue with
+// opening, reading, or stat'ing the file.
 func readFileContents(wt *git.Worktree, df diff.File) ([]byte, *os.FileMode, error) {
 	file, err := wt.Filesystem.Open(df.Path())
 	if err != nil {
@@ -212,6 +240,11 @@ func readFileContents(wt *git.Worktree, df diff.File) ([]byte, *os.FileMode, err
 	return contents, &mode, nil
 }
 
+// writeContents writes the provided contents to a specified file in a Git worktree
+// and sets its mode based on the provided os.FileMode. The function takes a pointer
+// to the git.Worktree, a diff.File for the target, the contents as a byte slice,
+// and a pointer to the file mode. It returns an error if there's an issue with
+// opening or writing to the file.
 func writeContents(wt *git.Worktree, df diff.File, contents []byte, mode *os.FileMode) error {
 	file, err := wt.Filesystem.OpenFile(df.Path(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, *mode)
 	if err != nil {
@@ -226,7 +259,12 @@ func writeContents(wt *git.Worktree, df diff.File, contents []byte, mode *os.Fil
 	return nil
 }
 
-// applyChanges applies the provided FilePatches.
+// applyChanges applies file patches to a fork based on a given MergeContext (mc).
+// The function reads changes from the upstream worktree and writes to the fork's.
+// It handles file deletions, additions, and modifications. After applying patches,
+// it commits the changes to the fork with a message indicating a merge from upstream.
+// The function returns an error if there's an issue with worktrees, applying patches,
+// or committing the changes.
 func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 	// Get the worktree for the Fork repository where changes will be applied.
 	wtFork, err := mc.Fork.Worktree()
@@ -282,6 +320,11 @@ func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 	return nil
 }
 
+// pushFork pushes changes from a fork repository to its remote based on a
+// given MergeContext (mc). It uses the provided credentials (creds) for
+// authentication. If the fork is up-to-date with the remote, it logs
+// "Everything is up-to-date.". On successful push, a confirmation is logged.
+// The function returns an error if there's an issue pushing the changes.
 func pushFork(mc *MergeContext, creds *Creds) error {
 	// Push using default options
 	options := &git.PushOptions{
@@ -303,12 +346,26 @@ func pushFork(mc *MergeContext, creds *Creds) error {
 	return nil
 }
 
-// processAndApply filters the FilePatches and then applies the changes.
+// processMerge filters and applies a series of file patches to a fork repository
+// based on the provided MergeContext (mc). It first filters the patches, then
+// applies the changes. The function returns an error if there's an issue during
+// the process.
 func processMerge(mc *MergeContext, filePatches []diff.FilePatch) error {
 	filteredPatches := filterPatches(mc, filePatches)
 	return applyChanges(mc, filteredPatches)
 }
 
+// processPushEvent handles a push event from a Git repository. Given the event's
+// payload and authentication credentials, the function performs several tasks:
+//   - Identifies the repository associated with the push.
+//   - Clears any previous repository data from a temporary directory.
+//   - Locates all forks of the repository and processes each one by:
+//     a. Cloning the upstream and fork repositories.
+//     b. Creating a merge context for the two repositories.
+//     c. Computing and applying diffs between the repositories.
+//     d. Pushing merged changes to the fork.
+//
+// Error situations, such as cloning failures or merge issues, are logged.
 func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 	// 1. Get the repository related to the push event
 	languagesURL := pushEvent.Repo.LanguagesURL
@@ -362,6 +419,10 @@ func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 	}
 }
 
+// webhookHandler handles incoming webhook requests, specifically for push events.
+// The function reads the request body, parses the push event, and processes it.
+// Any errors in reading or parsing are logged and result in a bad request response.
+// After processing the push event, a log confirmation is made.
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -384,6 +445,10 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("OK")
 }
 
+// readinessHandler checks the readiness of the service to handle requests.
+// In this implementation, it always indicates that the service is ready by
+// returning a 200 OK status. In more complex scenarios, this function could
+// check internal conditions before determining readiness.
 func readinessHandler(w http.ResponseWriter, r *http.Request) {
 	// Check conditions to determine if service is ready to handle requests.
 	// For simplicity, we're always returning 200 OK in this example.
@@ -391,6 +456,10 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Ready"))
 }
 
+// livenessHandler checks the health of the service to ensure it's running and
+// operational. In this implementation, it always indicates that the service is
+// alive by returning a 200 OK status. In more advanced scenarios, this function
+// could check internal health metrics before determining liveness.
 func livenessHandler(w http.ResponseWriter, r *http.Request) {
 	// Check conditions to determine if service is alive and healthy.
 	// For simplicity, we're always returning 200 OK in this example.
@@ -398,6 +467,10 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Alive"))
 }
 
+// main initializes an HTTP server with endpoints for processing push events,
+// checking service readiness, and determining service liveness. The server
+// listens on port 8000. Logging is utilized to indicate the server's start
+// and to capture any fatal errors.
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/onPush", webhookHandler)
