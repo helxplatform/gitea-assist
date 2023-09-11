@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -19,7 +22,8 @@ import (
 	gitHTTP "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
-type Creds struct {
+type GiteaAccess struct {
+	URL      string
 	Username string
 	Password string
 }
@@ -37,36 +41,52 @@ type MergeContext struct {
 	ForkHash         *plumbing.Hash
 }
 
-var creds *Creds
-
-func init() {
-	creds, _ = getCreds()
+type UserOptions struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
-// getCreds retrieves Gitea credentials (username and password) from
-// specified files in the system. It returns a pointer to a Creds
-// structure and an error if there's an issue reading the files.
-func getCreds() (*Creds, error) {
-	var creds *Creds
+type RepoOptions struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Owner       string `json:"owner"`
+	Private     bool   `json:"private"`
+}
+
+var access *GiteaAccess
+
+func init() {
+	access, _ = getAccess()
+}
+
+func getAccess() (*GiteaAccess, error) {
+	var access *GiteaAccess
 
 	username, err := os.ReadFile("/etc/assist-secret/gitea-username")
 	if err != nil {
 		log.Fatalf("Error reading username: %v", err)
-		return creds, err
+		return access, err
 	}
 
 	password, err := os.ReadFile("/etc/assist-secret/gitea-password")
 	if err != nil {
 		log.Fatalf("Error reading password: %v", err)
-		return creds, err
+		return access, err
 	}
 
-	creds = &Creds{
+	url, err := os.ReadFile("/etc/assist-config/gitea-api-url")
+	if err != nil {
+		log.Fatalf("Error reading password: %v", err)
+		return access, err
+	}
+
+	access = &GiteaAccess{
+		URL:      string(url),
 		Username: string(username),
 		Password: string(password),
 	}
 
-	return creds, nil
+	return access, nil
 }
 
 // findForks retrieves a list of forks for a given repository URL using
@@ -325,13 +345,13 @@ func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 // authentication. If the fork is up-to-date with the remote, it logs
 // "Everything is up-to-date.". On successful push, a confirmation is logged.
 // The function returns an error if there's an issue pushing the changes.
-func pushFork(mc *MergeContext, creds *Creds) error {
+func pushFork(mc *MergeContext, access *GiteaAccess) error {
 	// Push using default options
 	options := &git.PushOptions{
 		RemoteName: "origin",
 		Auth: &gitHTTP.BasicAuth{
-			Username: creds.Username,
-			Password: creds.Password,
+			Username: access.Username,
+			Password: access.Password,
 		},
 	}
 	if err := mc.Fork.Push(options); err != nil {
@@ -366,7 +386,7 @@ func processMerge(mc *MergeContext, filePatches []diff.FilePatch) error {
 //     d. Pushing merged changes to the fork.
 //
 // Error situations, such as cloning failures or merge issues, are logged.
-func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
+func processPushEvent(pushEvent *api.PushPayload, access *GiteaAccess) {
 	// 1. Get the repository related to the push event
 	languagesURL := pushEvent.Repo.LanguagesURL
 	repoURL := strings.ReplaceAll(languagesURL, "/languages", "")
@@ -378,7 +398,7 @@ func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 		return
 	}
 
-	if forks, err := findForks(repoURL, creds.Username, creds.Password); err == nil {
+	if forks, err := findForks(repoURL, access.Username, access.Password); err == nil {
 		var pushRepo *git.Repository
 
 		for _, fork := range forks {
@@ -408,7 +428,7 @@ func processPushEvent(pushEvent *api.PushPayload, creds *Creds) {
 			}
 			if diff, err := getDiffBetweenUpstreamAndFork(mc); err == nil {
 				if err = processMerge(mc, diff.FilePatches()); err == nil {
-					pushFork(mc, creds)
+					pushFork(mc, access)
 				} else {
 					log.Printf("failed to process merge of %s into %s", mc.UpstreamName, mc.ForkName)
 				}
@@ -440,9 +460,188 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Process the push event, including finding forks and pulling changes
-	processPushEvent(pushEvent, creds)
+	processPushEvent(pushEvent, access)
 
 	log.Printf("OK")
+}
+
+func createUser(giteaBaseURL, adminUsername, adminPassword, username, password string) (bool, error) {
+	/*
+		user := giteaAPI.CreateUserOption{
+			Username: username,
+			Email:    "jeffw@renci.org",
+			Password: password,
+		}
+	*/
+	type CreateUser struct {
+		Username string `json:"username" binding:"Required;Username;MaxSize(40)"`
+		Email    string `json:"email" binding:"Required;Email;MaxSize(254)"`
+		Password string `json:"password" binding:"Required;MaxSize(255)"`
+	}
+	user := CreateUser{
+		Username: username,
+		Email:    "xxx@gmail.com",
+		Password: password,
+	}
+
+	jsonData, _ := json.Marshal(user)
+
+	req, _ := http.NewRequest("POST", giteaBaseURL+"/admin/users", bytes.NewBuffer(jsonData))
+	//req.Header.Add("Authorization", "token "+token)
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		log.Println("Failed to create user:", string(body))
+		return false, nil
+	}
+	return true, nil
+}
+
+func handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options UserOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	if options.Username == "" || options.Password == "" {
+		http.Error(w, "Both username and password must be provided", http.StatusBadRequest)
+		return
+	}
+
+	log.Println("Received User Data:", options)
+	if success, err := createUser(access.URL, access.Username, access.Password, options.Username, options.Password); success {
+		// Respond to the client
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("User created successfully"))
+	} else {
+		http.Error(w, "User creation failed", http.StatusBadRequest)
+		if err != nil {
+			log.Printf("User creation failed %v", err)
+		} else {
+			log.Printf("User creation failed")
+		}
+	}
+}
+
+func handleGetUser(w http.ResponseWriter, r *http.Request) {
+	// ... (unchanged code from above)
+}
+
+func handleUser(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		handleCreateUser(w, r)
+	case http.MethodGet:
+		handleGetUser(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, name, description string, private bool) (bool, error) {
+	data := api.CreateRepoOption{
+		Name:        name,
+		Description: description,
+		Private:     private,
+	}
+
+	jsonData, _ := json.Marshal(data)
+
+	req, err := http.NewRequest("POST", giteaBaseURL+"/admin/users/"+username+"/repos", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return false, err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusCreated, nil
+}
+
+func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
+	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options RepoOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	if options.Name == "" || options.Description == "" || options.Owner == "" {
+		http.Error(w, "Name, description, and owner must be provided for the repo", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("Received Repo Data:", options)
+	if success, err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); success {
+		// Respond to the client
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("Repo created successfully"))
+	} else {
+		http.Error(w, "Repo creation failed", http.StatusBadRequest)
+		if err != nil {
+			log.Printf("Repo creation failed %v", err)
+		} else {
+			log.Printf("Repo creation failed")
+		}
+	}
+
+	// Respond to the client
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte("Repo created successfully"))
+}
+
+func handleGetRepo(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	if repoName == "" {
+		http.Error(w, "Repo name not provided", http.StatusBadRequest)
+		return
+	}
+
+	// For demonstration purposes, let's just echo back the repo name.
+	// In a real-world scenario, you'd probably query a database or other data source to fetch repo details.
+	//w.WriteHeader(http.StatusOK)
+	//w.Write([]byte(fmt.Sprintf("Details for repo: %s", repoName)))
+}
+
+func handleRepo(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		handleCreateRepo(w, r)
+	case http.MethodGet:
+		handleGetRepo(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // readinessHandler checks the readiness of the service to handle requests.
@@ -474,6 +673,8 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/onPush", webhookHandler)
+	http.HandleFunc("/users", handleUser)
+	http.HandleFunc("/repos", handleRepo)
 	mux.HandleFunc("/readiness", readinessHandler)
 	mux.HandleFunc("/liveness", livenessHandler)
 	log.Println("Server started on :8000")

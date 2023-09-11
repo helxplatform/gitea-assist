@@ -85,4 +85,5 @@ config:
   enabled: true
   secrets:
     creds: gitea-assist-creds
-  data: {}
+  data:
+    gitea-api-url: ""
