@@ -581,7 +581,7 @@ func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, nam
 }
 
 func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
 	if err != nil {
@@ -620,17 +620,56 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Repo created successfully"))
 }
 
-func handleGetRepo(w http.ResponseWriter, r *http.Request) {
-	repoName := r.URL.Query().Get("name")
-	if repoName == "" {
-		http.Error(w, "Repo name not provided", http.StatusBadRequest)
-		return
+func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) ([]byte, error) {
+
+	// Build the Gitea API URL for fetching the repo details
+	url := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repoName)
+
+	// Create a new request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return nil, err
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	// Check if the request was successful
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error fetching repo from Gitea %v", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
 
-	// For demonstration purposes, let's just echo back the repo name.
-	// In a real-world scenario, you'd probably query a database or other data source to fetch repo details.
-	//w.WriteHeader(http.StatusOK)
-	//w.Write([]byte(fmt.Sprintf("Details for repo: %s", repoName)))
+	// Read the response body from Gitea into a byte slice
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	return bodyBytes, nil
+}
+
+func handleGetRepo(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+	if repoName == "" || owner == "" {
+		http.Error(w, "Repo name and owner must be provided", http.StatusBadRequest)
+		return
+	}
+	if resp, err := getRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 }
 
 func handleRepo(w http.ResponseWriter, r *http.Request) {
@@ -673,8 +712,8 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/onPush", webhookHandler)
-	http.HandleFunc("/users", handleUser)
-	http.HandleFunc("/repos", handleRepo)
+	mux.HandleFunc("/users", handleUser)
+	mux.HandleFunc("/repos", handleRepo)
 	mux.HandleFunc("/readiness", readinessHandler)
 	mux.HandleFunc("/liveness", livenessHandler)
 	log.Println("Server started on :8000")
