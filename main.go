@@ -42,6 +42,7 @@ type MergeContext struct {
 }
 
 type UserOptions struct {
+	Email    string `json:"email"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
@@ -465,22 +466,22 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("OK")
 }
 
-func createUser(giteaBaseURL, adminUsername, adminPassword, username, password string) (bool, error) {
+func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, email string) (bool, error) {
 	/*
-		user := giteaAPI.CreateUserOption{
-			Username: username,
-			Email:    "jeffw@renci.org",
-			Password: password,
+			user := giteaAPI.CreateUserOption{
+				Username: username,
+				Email:    "jeffw@renci.org",
+				Password: password,
+			}
+		type CreateUser struct {
+			Username string `json:"username" binding:"Required;Username;MaxSize(40)"`
+			Email    string `json:"email" binding:"Required;Email;MaxSize(254)"`
+			Password string `json:"password" binding:"Required;MaxSize(255)"`
 		}
 	*/
-	type CreateUser struct {
-		Username string `json:"username" binding:"Required;Username;MaxSize(40)"`
-		Email    string `json:"email" binding:"Required;Email;MaxSize(254)"`
-		Password string `json:"password" binding:"Required;MaxSize(255)"`
-	}
-	user := CreateUser{
+	user := api.CreateUserOption{
 		Username: username,
-		Email:    "xxx@gmail.com",
+		Email:    email,
 		Password: password,
 	}
 
@@ -505,7 +506,7 @@ func createUser(giteaBaseURL, adminUsername, adminPassword, username, password s
 }
 
 func handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
 	if err != nil {
@@ -520,13 +521,13 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if options.Username == "" || options.Password == "" {
-		http.Error(w, "Both username and password must be provided", http.StatusBadRequest)
+	if options.Username == "" || options.Password == "" || options.Email == "" {
+		http.Error(w, "Username password, and email must be provided", http.StatusBadRequest)
 		return
 	}
 
 	log.Println("Received User Data:", options)
-	if success, err := createUser(access.URL, access.Username, access.Password, options.Username, options.Password); success {
+	if success, err := createUser(access.URL, access.Username, access.Password, options.Username, options.Password, options.Email); success {
 		// Respond to the client
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("User created successfully"))
@@ -540,8 +541,53 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func getUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]byte, error) {
+	url := fmt.Sprintf("%s/users/%s", giteaBaseURL, username)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+
+	// Set Basic Authentication header
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error querying gitea: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gitea returned status: %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading gitea response: %v", err)
+	}
+
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	return bodyBytes, nil
+}
+
 func handleGetUser(w http.ResponseWriter, r *http.Request) {
-	// ... (unchanged code from above)
+	// Retrieve the username from the query parameters
+	username := r.URL.Query().Get("username")
+	if username == "" {
+		http.Error(w, "Username not provided", http.StatusBadRequest)
+		return
+	}
+
+	if resp, err := getUser(access.URL, access.Username, access.Password, username); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 }
 
 func handleUser(w http.ResponseWriter, r *http.Request) {

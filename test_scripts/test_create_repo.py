@@ -6,6 +6,7 @@ import json
 
 def main():
     parser = argparse.ArgumentParser(description="Test repo creation via API.")
+    parser.add_argument("repo_name", help="Name of the repository to create")
     parser.add_argument("owner", help="Owner of the repository")
     parser.add_argument("--server", default="localhost", help="Server hostname with port (default: localhost)")
     
@@ -16,7 +17,7 @@ def main():
         "Content-Type": "application/json"
     }
     data = {
-        "Name": "MyRepo",
+        "Name": args.repo_name,
         "Description": "A test repository",
         "Owner": args.owner,
         "Private": False
