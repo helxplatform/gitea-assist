@@ -54,6 +54,12 @@ type RepoOptions struct {
 	Private     bool   `json:"private"`
 }
 
+type ForkOptions struct {
+	Owner    string `json:"owner"`
+	NewOwner string `json:"newOwner"`
+	Repo     string `json:"repo"`
+}
+
 var access *GiteaAccess
 
 func init() {
@@ -116,7 +122,7 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 	err = dec.Decode(&forks)
 
 	if err != nil {
-		log.Printf("unable to parse response from /forks %v", err)
+		log.Printf("unable to parse response from %s/forks %v", repoURL, err)
 		body, err := io.ReadAll(resp.Body)
 		log.Printf("body:\n %s", body)
 		return nil, err
@@ -729,6 +735,96 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func forkRepository(giteaBaseURL, adminUsername, adminPassword, owner, repo, newOwner string) (bool, error) {
+	data := api.CreateForkOption{
+		Name:         &repo,
+		Organization: &newOwner,
+	}
+
+	jsonData, _ := json.Marshal(data)
+
+	req, err := http.NewRequest("POST", giteaBaseURL+"/repos/"+owner+"/"+repo+"/forks", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return false, err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusCreated, nil
+}
+
+func handleCreateFork(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options ForkOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	// Here, you would typically make a request to the Gitea API to perform the fork.
+	// For this example, we're just going to simulate the fork by printing a message.
+	fmt.Println("Forking repo:", options.Repo, "for user:", options.NewOwner)
+	if success, err := forkRepository(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); success {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(fmt.Sprintf("Repo %s forked successfully for user %s", options.Repo, options.NewOwner)))
+	} else {
+		http.Error(w, "Fork failed", http.StatusBadRequest)
+		if err != nil {
+			log.Printf("Repo creation failed %v", err)
+		} else {
+			log.Printf("Repo creation failed")
+		}
+	}
+}
+
+func handleGetForks(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+	if name == "" || owner == "" {
+		http.Error(w, "Fork name and owner must be provided", http.StatusBadRequest)
+		return
+	}
+
+	repoURL := fmt.Sprintf("%s/repos/%s/%s", access.URL, owner, name)
+	if forks, err := findForks(repoURL, access.Username, access.Password); err == nil {
+		if bytes, err := json.Marshal(forks); err == nil {
+			w.WriteHeader(http.StatusOK)
+			w.Write(bytes)
+		} else {
+			log.Printf("Unable to parse findForks result %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	} else {
+		log.Printf("findForks failed %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func handleFork(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		handleCreateFork(w, r)
+	case http.MethodGet:
+		handleGetForks(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // readinessHandler checks the readiness of the service to handle requests.
 // In this implementation, it always indicates that the service is ready by
 // returning a 200 OK status. In more complex scenarios, this function could
@@ -760,6 +856,7 @@ func main() {
 	mux.HandleFunc("/onPush", webhookHandler)
 	mux.HandleFunc("/users", handleUser)
 	mux.HandleFunc("/repos", handleRepo)
+	mux.HandleFunc("/forks", handleFork)
 	mux.HandleFunc("/readiness", readinessHandler)
 	mux.HandleFunc("/liveness", livenessHandler)
 	log.Println("Server started on :8000")
