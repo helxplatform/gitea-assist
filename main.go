@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	api "code.gitea.io/gitea/modules/structs"
@@ -60,10 +61,21 @@ type ForkOptions struct {
 	Repo     string `json:"repo"`
 }
 
+type AtomicCounter struct {
+	val int64
+}
+
 var access *GiteaAccess
+var forkCounter *AtomicCounter
 
 func init() {
 	access, _ = getAccess()
+	forkCounter = &AtomicCounter{}
+}
+
+// Next returns the next number in sequence
+func (ac *AtomicCounter) Next() int64 {
+	return atomic.AddInt64(&ac.val, 1)
 }
 
 func getAccess() (*GiteaAccess, error) {
@@ -94,6 +106,63 @@ func getAccess() (*GiteaAccess, error) {
 	}
 
 	return access, nil
+}
+
+func createTokenForUser(giteaBaseURL, adminUsername, adminPassword, username, name string, scopes []string) (*api.AccessToken, error) {
+	var token api.AccessToken
+
+	option := api.CreateAccessTokenOption{
+		Name:   name,
+		Scopes: scopes,
+	}
+
+	jsonData, _ := json.Marshal(option)
+
+	req, err := http.NewRequest("POST", giteaBaseURL+"/admin/users/"+username+"/tokens", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("failed to create token for user %s", username)
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&token); err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
+func deleteTokenForUser(giteaBaseURL, adminUsername, adminPassword, targetUser, tokenId string) error {
+	req, err := http.NewRequest("DELETE", giteaBaseURL+"/admin/users/"+targetUser+"/tokens/"+tokenId, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("failed to delete token with id %s for user %s", tokenId, targetUser)
+	}
+
+	return nil
 }
 
 // findForks retrieves a list of forks for a given repository URL using
@@ -129,6 +198,61 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 	}
 
 	return forks, nil
+}
+
+func transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, owner, repo, newOwner string) error {
+	options := api.TransferRepoOption{
+		NewOwner: newOwner,
+	}
+	jsonData, _ := json.Marshal(options)
+
+	req, err := http.NewRequest("POST", giteaBaseURL+"/repos/"+owner+"/"+repo+"/transfer", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("failed to transfer repository ownership; HTTP status code: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func renameRepo(giteaBaseURL, adminUsername, adminPassword, owner, currentRepoName, newRepoName string) error {
+	options := api.EditRepoOption{
+		Name: &newRepoName,
+	}
+
+	jsonData, _ := json.Marshal(options)
+
+	req, err := http.NewRequest("PATCH", giteaBaseURL+"/repos/"+owner+"/"+currentRepoName, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("failed to rename repository; HTTP status code: %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 // cloneRepoIntoDir clones a given Git repository into a specified directory.
@@ -735,19 +859,29 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func forkRepository(giteaBaseURL, adminUsername, adminPassword, owner, repo, newOwner string) (bool, error) {
-	data := api.CreateForkOption{
-		Name:         &repo,
-		Organization: &newOwner,
-	}
+func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo, user string) (bool, error) {
+	/*
+		reenable this once gitea bug #26234 is fixed
 
-	jsonData, _ := json.Marshal(data)
+		token, err := createTokenForUser(giteaBaseURL, adminUsername, adminPassword, user, "fork_tok", []string{"write:repository"})
+		if err != nil {
+			return false, err
+		}
+	*/
+
+	tmpRepoName := fmt.Sprintf("%s-%d", repo, forkCounter.Next())
+
+	option := api.CreateForkOption{
+		Name: &tmpRepoName,
+	}
+	jsonData, _ := json.Marshal(option)
 
 	req, err := http.NewRequest("POST", giteaBaseURL+"/repos/"+owner+"/"+repo+"/forks", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return false, err
 	}
 
+	//req.Header.Add("Authorization", "token "+token.Token)
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 
@@ -757,7 +891,19 @@ func forkRepository(giteaBaseURL, adminUsername, adminPassword, owner, repo, new
 	}
 	defer resp.Body.Close()
 
-	return resp.StatusCode == http.StatusCreated, nil
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusAccepted {
+		if err := transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, adminUsername, tmpRepoName, user); err == nil {
+			if err := renameRepo(giteaBaseURL, adminUsername, adminPassword, user, tmpRepoName, repo); err == nil {
+				return true, nil
+			} else {
+				return false, err
+			}
+		} else {
+			return false, err
+		}
+	} else {
+		return false, fmt.Errorf("transfer failed with code %v", resp.StatusCode)
+	}
 }
 
 func handleCreateFork(w http.ResponseWriter, r *http.Request) {
@@ -778,7 +924,7 @@ func handleCreateFork(w http.ResponseWriter, r *http.Request) {
 	// Here, you would typically make a request to the Gitea API to perform the fork.
 	// For this example, we're just going to simulate the fork by printing a message.
 	fmt.Println("Forking repo:", options.Repo, "for user:", options.NewOwner)
-	if success, err := forkRepository(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); success {
+	if success, err := forkRepositoryForUser(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); success {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(fmt.Sprintf("Repo %s forked successfully for user %s", options.Repo, options.NewOwner)))
 	} else {
