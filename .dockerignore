@@ -1,1 +1,9 @@
 tmp
+chart
+.git
+.dockerignore
+.gitignore
+.devcontainer
+*.swp
+*.tgz
+*.yaml

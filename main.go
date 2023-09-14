@@ -61,6 +61,10 @@ type ForkOptions struct {
 	Repo     string `json:"repo"`
 }
 
+type OrgOptions struct {
+	OrgName string `json:"org_name"`
+}
+
 type AtomicCounter struct {
 	val int64
 }
@@ -921,8 +925,6 @@ func handleCreateFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Here, you would typically make a request to the Gitea API to perform the fork.
-	// For this example, we're just going to simulate the fork by printing a message.
 	fmt.Println("Forking repo:", options.Repo, "for user:", options.NewOwner)
 	if success, err := forkRepositoryForUser(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); success {
 		w.WriteHeader(http.StatusCreated)
@@ -971,6 +973,130 @@ func handleFork(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func getOrg(giteaBaseURL, adminUsername, adminPassword, orgName string) (*api.Organization, error) {
+
+	req, err := http.NewRequest("GET", giteaBaseURL+"/orgs/"+orgName, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get organization details; HTTP status code: %d", resp.StatusCode)
+	}
+
+	var orgDetails api.Organization
+
+	json.NewDecoder(resp.Body).Decode(&orgDetails)
+
+	return &orgDetails, nil
+}
+
+func handleGetOrg(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("org_name")
+	if name == "" {
+		http.Error(w, "Orgname be provided", http.StatusBadRequest)
+		return
+	}
+
+	if org, err := getOrg(access.URL, access.Username, access.Password, name); err == nil {
+		if bytes, err := json.Marshal(org); err == nil {
+			w.WriteHeader(http.StatusOK)
+			w.Write(bytes)
+		} else {
+			log.Printf("Unable to parse getOrg result %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	} else {
+		log.Printf("getOrg failed %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func createOrg(giteaBaseURL, adminUsername, adminPassword, orgName string) error {
+
+	options := api.CreateOrgOption{
+		UserName:   orgName,
+		Visibility: "public",
+	}
+
+	jsonData, _ := json.Marshal(options)
+
+	req, err := http.NewRequest("POST", giteaBaseURL+"/orgs", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	req.Header.Add("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("failed to create organization; HTTP status code: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options OrgOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	if options.OrgName == "" {
+		http.Error(w, "name must be provided", http.StatusBadRequest)
+		return
+	}
+
+	log.Println("Received Org Data:", options)
+	if err := createOrg(access.URL, access.Username, access.Password, options.OrgName); err == nil {
+		// Respond to the client
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("Org created successfully"))
+	} else {
+		http.Error(w, "Org creation failed", http.StatusBadRequest)
+		if err != nil {
+			log.Printf("Org creation failed %v", err)
+		} else {
+			log.Printf("Org creation failed")
+		}
+	}
+}
+
+func handleOrg(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		handleCreateOrg(w, r)
+	case http.MethodGet:
+		handleGetOrg(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // readinessHandler checks the readiness of the service to handle requests.
 // In this implementation, it always indicates that the service is ready by
 // returning a 200 OK status. In more complex scenarios, this function could
@@ -1003,6 +1129,7 @@ func main() {
 	mux.HandleFunc("/users", handleUser)
 	mux.HandleFunc("/repos", handleRepo)
 	mux.HandleFunc("/forks", handleFork)
+	mux.HandleFunc("/orgs", handleOrg)
 	mux.HandleFunc("/readiness", readinessHandler)
 	mux.HandleFunc("/liveness", livenessHandler)
 	log.Println("Server started on :8000")
