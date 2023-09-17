@@ -259,6 +259,68 @@ func renameRepo(giteaBaseURL, adminUsername, adminPassword, owner, currentRepoNa
 	return nil
 }
 
+func createTeam(giteaBaseURL, adminUsername, adminPassword, orgName, teamName, description string) error {
+	reqURL := fmt.Sprintf("%s/orgs/%s/teams", giteaBaseURL, orgName)
+
+	// Define team details
+	options := api.CreateTeamOption{
+		Name:                    teamName,
+		Description:             description,
+		IncludesAllRepositories: true,
+		CanCreateOrgRepo:        true,
+		Permission:              "write",
+	}
+
+	jsonData, _ := json.Marshal(options)
+
+	req, err := http.NewRequest("POST", reqURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("failed to create team; HTTP status code: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, teamName string) (int64, error) {
+	reqURL := fmt.Sprintf("%s/orgs/%s/teams", giteaBaseURL, orgName)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return -1, err
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer resp.Body.Close()
+
+	var teams []api.Team
+	json.NewDecoder(resp.Body).Decode(&teams)
+
+	for _, team := range teams {
+		if team.Name == teamName {
+			return team.ID, nil
+		}
+	}
+
+	return -1, fmt.Errorf("team %s not found in organization %s", teamName, orgName)
+}
+
 // cloneRepoIntoDir clones a given Git repository into a specified directory.
 // If the parent directory doesn't exist, it's created. The function takes the
 // parent directory path, desired repository name for the clone, and the clone
@@ -1073,9 +1135,18 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Received Org Data:", options)
 	if err := createOrg(access.URL, access.Username, access.Password, options.OrgName); err == nil {
-		// Respond to the client
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte("Org created successfully"))
+		if err := createTeam(access.URL, access.Username, access.Password, options.OrgName, options.OrgName, "Primary Team for "+options.OrgName); err == nil {
+			// Respond to the client
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte("Org created successfully"))
+		} else {
+			http.Error(w, "Org-Team creation failed", http.StatusBadRequest)
+			if err != nil {
+				log.Printf("Org-Team creation failed %v", err)
+			} else {
+				log.Printf("Org-Team creation failed")
+			}
+		}
 	} else {
 		http.Error(w, "Org creation failed", http.StatusBadRequest)
 		if err != nil {
