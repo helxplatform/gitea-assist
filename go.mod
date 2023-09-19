@@ -2,7 +2,10 @@ module gitea_assist
 
 go 1.20
 
-require code.gitea.io/gitea v1.20.2
+require (
+	code.gitea.io/gitea v1.20.2
+	github.com/gorilla/mux v1.8.0
+)
 
 require (
 	dario.cat/mergo v1.0.0 // indirect

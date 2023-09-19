@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gitHTTP "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/gorilla/mux"
 )
 
 type GiteaAccess struct {
@@ -269,6 +270,7 @@ func createTeam(giteaBaseURL, adminUsername, adminPassword, orgName, teamName, d
 		IncludesAllRepositories: true,
 		CanCreateOrgRepo:        true,
 		Permission:              "write",
+		UnitsMap:                map[string]string{"repo.code": "write"},
 	}
 
 	jsonData, _ := json.Marshal(options)
@@ -319,6 +321,37 @@ func getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, teamName str
 	}
 
 	return -1, fmt.Errorf("team %s not found in organization %s", teamName, orgName)
+}
+
+func addUserToTeam(giteaBaseURL, adminUsername, adminPassword, orgName, teamName, userName string) error {
+	teamID, err := getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, teamName)
+	if err != nil {
+		return err
+	}
+
+	reqURL := fmt.Sprintf("%s/teams/%d/members/%s", giteaBaseURL, teamID, userName)
+	req, err := http.NewRequest("PUT", reqURL, bytes.NewBuffer(nil))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		var responseError map[string]interface{}
+
+		json.NewDecoder(resp.Body).Decode(&responseError)
+		return fmt.Errorf("failed to add user to team; HTTP status code: %d, message: %s", resp.StatusCode, responseError["message"])
+	}
+
+	return nil
 }
 
 // cloneRepoIntoDir clones a given Git repository into a specified directory.
@@ -1168,6 +1201,75 @@ func handleOrg(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func getOrgMembers(giteaBaseURL, adminUsername, adminPassword, orgName string) ([]api.User, error) {
+	teamID, err := getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, orgName)
+	if err != nil {
+		return nil, err
+	}
+
+	reqURL := fmt.Sprintf("%s/teams/%d/members", giteaBaseURL, teamID)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var responseError map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&responseError)
+		return nil, fmt.Errorf("failed to get team members; HTTP status code: %d, message: %s", resp.StatusCode, responseError["message"])
+	}
+
+	var members []api.User
+	json.NewDecoder(resp.Body).Decode(&members)
+
+	return members, nil
+}
+
+func handleGetMembers(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	orgName := vars["orgName"]
+
+	if orgName == "" {
+		http.Error(w, "Orgname not provided", http.StatusBadRequest)
+		return
+	}
+
+	if members, err := getOrgMembers(access.URL, access.Username, access.Password, orgName); err == nil {
+		if bytes, err := json.Marshal(members); err == nil {
+			w.WriteHeader(http.StatusOK)
+			w.Write(bytes)
+		} else {
+			log.Printf("Unable to parse getMembers result %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	} else {
+		log.Printf("getMembers failed %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func handleAddMember(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	orgName := vars["orgName"]
+	userName := vars["userName"]
+
+	if err := addUserToTeam(access.URL, access.Username, access.Password, orgName, orgName, userName); err == nil {
+		// Respond to the client
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("User added to organization"))
+	} else {
+		http.Error(w, "Add user failed", http.StatusInternalServerError)
+	}
+}
+
 // readinessHandler checks the readiness of the service to handle requests.
 // In this implementation, it always indicates that the service is ready by
 // returning a 200 OK status. In more complex scenarios, this function could
@@ -1195,14 +1297,18 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 // listens on port 8000. Logging is utilized to indicate the server's start
 // and to capture any fatal errors.
 func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/onPush", webhookHandler)
-	mux.HandleFunc("/users", handleUser)
-	mux.HandleFunc("/repos", handleRepo)
-	mux.HandleFunc("/forks", handleFork)
-	mux.HandleFunc("/orgs", handleOrg)
-	mux.HandleFunc("/readiness", readinessHandler)
-	mux.HandleFunc("/liveness", livenessHandler)
+	//mux := http.NewServeMux()
+	r := mux.NewRouter()
+	r.HandleFunc("/onPush", webhookHandler)
+	r.HandleFunc("/users", handleUser)
+	r.HandleFunc("/repos", handleRepo)
+	r.HandleFunc("/forks", handleFork)
+	r.HandleFunc("/orgs", handleOrg)
+	r.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
+	r.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
+	r.HandleFunc("/readiness", readinessHandler)
+	r.HandleFunc("/liveness", livenessHandler)
+	http.Handle("/", r)
 	log.Println("Server started on :8000")
-	log.Fatal(http.ListenAndServe(":8000", mux))
+	log.Fatal(http.ListenAndServe(":8000", nil))
 }
