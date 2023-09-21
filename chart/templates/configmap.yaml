@@ -4,5 +4,6 @@ kind: ConfigMap
 metadata:
   name: {{ include "gitea-assist.fullname" . }}
 data:
+  fullname: {{ include "gitea-assist.fullname" . }}
   {{- toYaml .Values.config.data | nindent 2 }}
 {{- end }}

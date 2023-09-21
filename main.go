@@ -18,6 +18,8 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+
 	"github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gitHTTP "github.com/go-git/go-git/v5/plumbing/transport/http"
@@ -41,6 +43,7 @@ type MergeContext struct {
 	ForkName         string
 	ForkBranch       string
 	ForkHash         *plumbing.Hash
+	ForkIsEmpty      bool
 }
 
 type UserOptions struct {
@@ -72,9 +75,11 @@ type AtomicCounter struct {
 
 var access *GiteaAccess
 var forkCounter *AtomicCounter
+var fullname string
 
 func init() {
 	access, _ = getAccess()
+	fullname, _ = getFullname()
 	forkCounter = &AtomicCounter{}
 }
 
@@ -111,6 +116,16 @@ func getAccess() (*GiteaAccess, error) {
 	}
 
 	return access, nil
+}
+
+func getFullname() (string, error) {
+	if fullname, err := os.ReadFile("/etc/assist-config/fullname"); err == nil {
+		return string(fullname), nil
+	} else {
+		log.Fatalf("Error reading fullname: %v", err)
+		return "", err
+	}
+
 }
 
 func createTokenForUser(giteaBaseURL, adminUsername, adminPassword, username, name string, scopes []string) (*api.AccessToken, error) {
@@ -354,12 +369,52 @@ func addUserToTeam(giteaBaseURL, adminUsername, adminPassword, orgName, teamName
 	return nil
 }
 
+func createWebhook(giteaBaseURL, adminUsername, adminPassword, owner, repo, fullname string) error {
+	reqURL := fmt.Sprintf("%s/repos/%s/%s/hooks", giteaBaseURL, owner, repo)
+
+	config := api.CreateHookOptionConfig{
+		"content_type": "json",
+		"url":          "http://" + fullname + ":8000/onPush",
+	}
+
+	options := api.CreateHookOption{
+		Type:   "gitea",
+		Events: []string{"push"},
+		Config: config,
+		Active: true,
+	}
+
+	jsonData, _ := json.Marshal(options)
+
+	req, err := http.NewRequest("POST", reqURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		var responseError map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&responseError)
+		return fmt.Errorf("failed to create webhook; HTTP status code: %d, message: %s", resp.StatusCode, responseError["message"])
+	}
+
+	return nil
+}
+
 // cloneRepoIntoDir clones a given Git repository into a specified directory.
 // If the parent directory doesn't exist, it's created. The function takes the
 // parent directory path, desired repository name for the clone, and the clone
 // URL as input. It returns a pointer to the cloned git.Repository and an error
 // if there's an issue with directory creation or the cloning process.
-func cloneRepoIntoDir(parentDir, repoName, cloneURL string) (*git.Repository, error) {
+func cloneRepoIntoDir(parentDir, repoName, cloneURL string, allowEmpty bool) (*git.Repository, error) {
 	// Check if the parent directory exists. If not, create it.
 	if _, err := os.Stat(parentDir); os.IsNotExist(err) {
 		err := os.MkdirAll(parentDir, 0755)
@@ -377,9 +432,43 @@ func cloneRepoIntoDir(parentDir, repoName, cloneURL string) (*git.Repository, er
 		RecurseSubmodules: git.DefaultSubmoduleRecursionDepth,
 	})
 
-	log.Printf("Cloned %s into %s", cloneURL, fullPath)
+	if err == transport.ErrEmptyRemoteRepository && allowEmpty {
+		return nil, nil
+	}
+
+	if err == nil {
+		log.Printf("Cloned %s into %s", cloneURL, fullPath)
+	} else {
+		log.Printf("Failed to clone %s", cloneURL)
+	}
 
 	return repo, err
+}
+
+func InitRepoWithRemote(directory, remoteURL, branchName string) (*git.Repository, error) {
+	// Initialize a new repository
+	repo, err := git.PlainInit(directory, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the remote
+	_, err = repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remoteURL},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Create and set the default branch to the specified branch name
+	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(branchName))
+	err = repo.Storer.SetReference(headRef)
+	if err != nil {
+		return nil, err
+	}
+
+	return repo, nil
 }
 
 // getDiffBetweenUpstreamAndFork calculates the diff between an upstream Git
@@ -389,7 +478,7 @@ func cloneRepoIntoDir(parentDir, repoName, cloneURL string) (*git.Repository, er
 // MergeContext (mc) containing details about repositories, branches, etc.
 // It returns the calculated diff as an *object.Patch and an error if issues
 // arise during the process.
-func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
+func getDiffBetweenUpstreamAndFork(mc *MergeContext) ([]*object.Patch, error) {
 	// Add the original repo as an upstream remote
 	_, err := mc.Fork.CreateRemote(&config.RemoteConfig{
 		Name: "upstream",
@@ -418,30 +507,59 @@ func getDiffBetweenUpstreamAndFork(mc *MergeContext) (*object.Patch, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	forkRef, err := mc.Fork.Reference(plumbing.ReferenceName("refs/heads/"+mc.ForkBranch), true)
-	if err != nil {
-		return nil, err
-	}
-	forkHash := forkRef.Hash()
-
-	forkCommit, err := mc.Fork.CommitObject(forkHash)
-	if err != nil {
-		return nil, err
-	}
-
-	// Calculate the diff between the two commits
-	diff, err := upstreamCommit.Patch(forkCommit)
-	if err != nil {
-		return nil, err
-	}
-
 	mc.UpstreamHash = &upstreamHash
-	mc.ForkHash = &forkHash
+
+	var patches []*object.Patch
+
+	if !mc.ForkIsEmpty {
+		forkRef, err := mc.Fork.Reference(plumbing.ReferenceName("refs/heads/"+mc.ForkBranch), true)
+		if err != nil {
+			return nil, err
+		}
+		forkHash := forkRef.Hash()
+		mc.ForkHash = &forkHash
+
+		forkCommit, err := mc.Fork.CommitObject(forkHash)
+		if err != nil {
+			return nil, err
+		}
+
+		// Calculate the diff between the two commits
+		diff, err := upstreamCommit.Patch(forkCommit)
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, diff)
+	} else {
+		emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+		emptyTree, err := mc.Fork.TreeObject(emptyTreeHash)
+		if err != nil {
+			log.Printf("Failed to get empty tree: %s", err)
+		}
+
+		// Calculate the diff between the two commits
+		upstreamTree, err := upstreamCommit.Tree()
+		if err != nil {
+			return nil, err
+		}
+
+		if changes, err := object.DiffTree(emptyTree, upstreamTree); err == nil {
+			// Iterate over the changes to collect individual patches
+			for _, change := range changes {
+				patch, err := change.Patch()
+				if err != nil {
+					log.Printf("Failed to generate patch: %s", err)
+				}
+				patches = append(patches, patch)
+			}
+		} else {
+			return nil, err
+		}
+	}
 
 	log.Printf("Collected diffs between %s and %s", mc.UpstreamName, mc.ForkName)
 
-	return diff, nil
+	return patches, nil
 }
 
 // filterPatches filters the given list of file patches based on criteria.
@@ -552,13 +670,19 @@ func applyChanges(mc *MergeContext, filePatches []diff.FilePatch) error {
 	}
 
 	// Commit the changes to the fork repository.
+	var parents []plumbing.Hash = []plumbing.Hash{*mc.UpstreamHash}
+
+	if mc.ForkHash != nil {
+		parents = append(parents, *mc.ForkHash)
+	}
+
 	options := git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Mr McMergybot",
 			Email: "merge-botCMXX@renci.org",
 			When:  time.Now(),
 		},
-		Parents: []plumbing.Hash{*mc.UpstreamHash, *mc.ForkHash},
+		Parents: parents,
 	}
 	if _, err = wtFork.Commit("Merge changes from "+mc.UpstreamName, &options); err != nil {
 		log.Printf("Failed to merge %s and %s: %v", mc.UpstreamName, mc.ForkName, err)
@@ -617,6 +741,8 @@ func processMerge(mc *MergeContext, filePatches []diff.FilePatch) error {
 //
 // Error situations, such as cloning failures or merge issues, are logged.
 func processPushEvent(pushEvent *api.PushPayload, access *GiteaAccess) {
+	var forkIsEmpty bool = false
+
 	// 1. Get the repository related to the push event
 	languagesURL := pushEvent.Repo.LanguagesURL
 	repoURL := strings.ReplaceAll(languagesURL, "/languages", "")
@@ -634,16 +760,25 @@ func processPushEvent(pushEvent *api.PushPayload, access *GiteaAccess) {
 		for _, fork := range forks {
 			log.Printf("found fork %s", fork.Owner.UserName+"/"+fork.Name)
 			if pushRepo == nil {
-				pushRepo, err = cloneRepoIntoDir("/tmp/repos/", "upstream/"+pushEvent.Repo.Name, pushEvent.Repo.CloneURL)
+				pushRepo, err = cloneRepoIntoDir("/tmp/repos/", "upstream/"+pushEvent.Repo.Name, pushEvent.Repo.CloneURL, false)
 				if err != nil {
 					log.Printf("Failed to clone the upstream repository: %v", err)
 					return
 				}
 			}
-			forkRepo, err := cloneRepoIntoDir("/tmp/repos/", fork.Owner.UserName+"/"+fork.Name, fork.CloneURL)
+			forkRepo, err := cloneRepoIntoDir("/tmp/repos/", fork.Owner.UserName+"/"+fork.Name, fork.CloneURL, true)
 			if err != nil {
 				log.Printf("Failed to clone the fork repository: %v", err)
 				continue
+			}
+
+			// This happens when the fork is empty, so have to initilize it locally
+			if forkRepo == nil {
+				if forkRepo, err = InitRepoWithRemote("/tmp/repos/"+fork.Owner.UserName+"/"+fork.Name, fork.CloneURL, pushEvent.Branch()); err != nil {
+					log.Printf("Failed to initialize blank fork repository: %v", err)
+					continue
+				}
+				forkIsEmpty = true
 			}
 
 			mc := &MergeContext{
@@ -655,15 +790,21 @@ func processPushEvent(pushEvent *api.PushPayload, access *GiteaAccess) {
 				ForkCloneURL:     fork.CloneURL,
 				ForkName:         fork.Owner.UserName + "/" + fork.Name,
 				ForkBranch:       pushEvent.Branch(),
+				ForkIsEmpty:      forkIsEmpty,
 			}
-			if diff, err := getDiffBetweenUpstreamAndFork(mc); err == nil {
-				if err = processMerge(mc, diff.FilePatches()); err == nil {
+			if patches, err := getDiffBetweenUpstreamAndFork(mc); err == nil {
+				var filePatches []diff.FilePatch
+
+				for _, patch := range patches {
+					filePatches = append(filePatches, patch.FilePatches()...)
+				}
+				if err = processMerge(mc, filePatches); err == nil {
 					pushFork(mc, access)
 				} else {
-					log.Printf("failed to process merge of %s into %s", mc.UpstreamName, mc.ForkName)
+					log.Printf("failed to process merge of %s into %s: %v", mc.UpstreamName, mc.ForkName, err)
 				}
 			} else {
-				log.Printf("failed to compute upstream and fork diff")
+				log.Printf("failed to compute upstream and fork diff: %v", err)
 			}
 		}
 	}
@@ -830,7 +971,7 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, name, description string, private bool) (bool, error) {
+func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, name, description string, private bool) error {
 	data := api.CreateRepoOption{
 		Name:        name,
 		Description: description,
@@ -841,18 +982,21 @@ func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, nam
 
 	req, err := http.NewRequest("POST", giteaBaseURL+"/admin/users/"+username+"/repos", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer resp.Body.Close()
 
-	return resp.StatusCode == http.StatusCreated, nil
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
@@ -877,17 +1021,17 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Println("Received Repo Data:", options)
-	if success, err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); success {
-		// Respond to the client
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte("Repo created successfully"))
+	if err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); err == nil {
+		if err := createWebhook(access.URL, access.Username, access.Password, options.Owner, options.Name, fullname); err == nil {
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte("Repo created successfully"))
+		} else {
+			http.Error(w, "Webhook creation failed", http.StatusBadRequest)
+			log.Printf("Webhook creation failed %v", err)
+		}
 	} else {
 		http.Error(w, "Repo creation failed", http.StatusBadRequest)
-		if err != nil {
-			log.Printf("Repo creation failed %v", err)
-		} else {
-			log.Printf("Repo creation failed")
-		}
+		log.Printf("Repo creation failed %v", err)
 	}
 
 	// Respond to the client
@@ -958,7 +1102,7 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo, user string) (bool, error) {
+func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo, user string) error {
 	/*
 		reenable this once gitea bug #26234 is fixed
 
@@ -977,31 +1121,34 @@ func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, re
 
 	req, err := http.NewRequest("POST", giteaBaseURL+"/repos/"+owner+"/"+repo+"/forks", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	//req.Header.Add("Authorization", "token "+token.Token)
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusAccepted {
-		if err := transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, adminUsername, tmpRepoName, user); err == nil {
-			if err := renameRepo(giteaBaseURL, adminUsername, adminPassword, user, tmpRepoName, repo); err == nil {
-				return true, nil
-			} else {
-				return false, err
-			}
-		} else {
-			return false, err
+		if err := transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, adminUsername, tmpRepoName, user); err != nil {
+			log.Printf("transfer ownership of %s to %s failed: %v", tmpRepoName, user, err)
+			return err
 		}
+		if err := renameRepo(giteaBaseURL, adminUsername, adminPassword, user, tmpRepoName, repo); err != nil {
+			log.Printf("rename of repo from %s to %s failed %v", tmpRepoName, repo, err)
+			return err
+		}
+		if err := createWebhook(access.URL, access.Username, access.Password, user, repo, fullname); err != nil {
+			log.Printf("create webhook for repo %s failed %v", repo, err)
+			return err
+		}
+		return nil
 	} else {
-		return false, fmt.Errorf("transfer failed with code %v", resp.StatusCode)
+		return fmt.Errorf("fork failed with code %v", resp.StatusCode)
 	}
 }
 
@@ -1021,7 +1168,7 @@ func handleCreateFork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Println("Forking repo:", options.Repo, "for user:", options.NewOwner)
-	if success, err := forkRepositoryForUser(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); success {
+	if err := forkRepositoryForUser(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); err == nil {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(fmt.Sprintf("Repo %s forked successfully for user %s", options.Repo, options.NewOwner)))
 	} else {
@@ -1116,7 +1263,6 @@ func handleGetOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func createOrg(giteaBaseURL, adminUsername, adminPassword, orgName string) error {
-
 	options := api.CreateOrgOption{
 		UserName:   orgName,
 		Visibility: "public",
@@ -1169,24 +1315,15 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received Org Data:", options)
 	if err := createOrg(access.URL, access.Username, access.Password, options.OrgName); err == nil {
 		if err := createTeam(access.URL, access.Username, access.Password, options.OrgName, options.OrgName, "Primary Team for "+options.OrgName); err == nil {
-			// Respond to the client
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte("Org created successfully"))
 		} else {
 			http.Error(w, "Org-Team creation failed", http.StatusBadRequest)
-			if err != nil {
-				log.Printf("Org-Team creation failed %v", err)
-			} else {
-				log.Printf("Org-Team creation failed")
-			}
+			log.Printf("Org-Team creation failed %v", err)
 		}
 	} else {
 		http.Error(w, "Org creation failed", http.StatusBadRequest)
-		if err != nil {
-			log.Printf("Org creation failed %v", err)
-		} else {
-			log.Printf("Org creation failed")
-		}
+		log.Printf("Org creation failed %v", err)
 	}
 }
 
