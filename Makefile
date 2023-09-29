@@ -14,17 +14,22 @@ build:
 # Run tests
 test:
 	@echo "Running tests..."
-	go test -v ./...
+	go fmt ./...
+	go vet ./...
+	go test ./...
 
 # Build the Docker container
 docker-build: build
 	@echo "Building Docker container..."
-	docker build -t $(CONTAINER_NAME) .
+		docker build \
+	--platform=linux/amd64 \
+	--build-arg=BINARY_NAME=$(BINARY_NAME) \
+	--tag=$(REGISTRY_NAME)/$(CONTAINER_NAME) \
+	.
 
 # Push the Docker container
 docker-push: docker-build
 	@echo "Pushing Docker container..."
-	docker tag $(CONTAINER_NAME) $(REGISTRY_NAME)/$(CONTAINER_NAME)
 	docker push $(REGISTRY_NAME)/$(CONTAINER_NAME)
 
 # Clean up
