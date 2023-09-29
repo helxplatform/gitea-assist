@@ -9,8 +9,8 @@ on:
       - develop
     paths-ignore:
       - README.md
-      # - .github/*
-      # - .github/workflows/*
+      - .github/*
+      - .github/workflows/*
       - LICENSE
       - .gitignore
       - .dockerignore
