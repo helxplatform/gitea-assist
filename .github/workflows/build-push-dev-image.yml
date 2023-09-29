@@ -9,8 +9,8 @@ on:
       - develop
     paths-ignore:
       - README.md
-      - .github/*
-      - .github/workflows/*
+      # - .github/*
+      # - .github/workflows/*
       - LICENSE
       - .gitignore
       - .dockerignore
@@ -74,7 +74,7 @@ jobs:
     - name: Build Push Container
       uses: docker/build-push-action@v5
       with:
-        build-args: BINARY_NAME=${{ BINARY_NAME }}
+        build-args: BINARY_NAME=${{ steps.BINARY_NAME.outputs.BINARY_NAME }}
         context: .
         push: true
         # Push to renci-registry and dockerhub here.

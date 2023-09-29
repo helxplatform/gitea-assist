@@ -5,7 +5,7 @@ BINARY_NAME=assistant
 
 # This is done to easily pass BINARY_NAME to github-actions
 echo:
-	@echo $(BINARY_NAME)
+	@echo "BINARY_NAME=$(BINARY_NAME)"
 
 # Variable for the container name
 REGISTRY_NAME=containers.renci.org/helxplatform
