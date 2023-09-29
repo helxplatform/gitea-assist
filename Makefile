@@ -2,6 +2,11 @@
 
 # Variable for the binary name
 BINARY_NAME=assistant
+
+# This is done to easily pass BINARY_NAME to github-actions
+echo:
+	@echo $(BINARY_NAME)
+
 # Variable for the container name
 REGISTRY_NAME=containers.renci.org/helxplatform
 CONTAINER_NAME=gitea-assist:latest
