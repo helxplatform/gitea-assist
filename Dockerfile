@@ -8,11 +8,9 @@ WORKDIR /app
 # Copy the Go source files, Makefile, etc.
 COPY . .
 
-# Install make
-RUN apt-get update && apt-get install -y make
-
-# Use the Makefile to build the Go application
-RUN make build
+# Build the Go application passing BINARY_NAME from Makefile (local development)
+# or Github Action Build-Arg. 
+RUN go build -o ${BINARY_NAME}
 
 # Using a multi-stage build
 FROM alpine:3.18

@@ -45,6 +45,11 @@ jobs:
     - name: Confirm git commit SHA output
       run: echo ${{ steps.vars.outputs.short_sha }}
 
+    - name: Echo BINARY_NAME set in Makefile
+      id: BINARY_NAME 
+      run: |
+        make echo >> $GITHUB_OUTPUT
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -69,6 +74,7 @@ jobs:
     - name: Build Push Container
       uses: docker/build-push-action@v5
       with:
+        build-args: BINARY_NAME=${{ $BINARY_NAME }}
         context: .
         push: true
         # Push to renci-registry and dockerhub here.
