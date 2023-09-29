@@ -20,7 +20,7 @@ ARG BINARY_NAME
 RUN addgroup -g 1000 -S assistant && \
   adduser -u 1000 -G assistant -S assistant
 
-COPY --from=build --chown=assistant:assistant "/app/{$BINARY_NAME}" /app/
+COPY --from=build --chown=assistant:assistant /app/${BINARY_NAME} /app/
 # Expose port 8080
 EXPOSE 8080
 
