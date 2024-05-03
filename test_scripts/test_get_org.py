@@ -10,7 +10,7 @@ def main():
     
     args = parser.parse_args()
 
-    url = f"http://{args.server}:8000/orgs?org_name={args.org_name}"
+    url = f"http://{args.server}:9000/orgs?org_name={args.org_name}"
     
     response = requests.get(url)
     

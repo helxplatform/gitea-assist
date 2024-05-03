@@ -5,10 +5,9 @@ import requests
 import json
 
 def main():
-    parser = argparse.ArgumentParser(description="Test user creation via API.")
-    parser.add_argument("username", help="Username for the new user")
-    parser.add_argument("password", help="Password for the new user")
-    parser.add_argument("email", help="Email for the new user")
+    parser = argparse.ArgumentParser(description="Test user deletion via API.")
+    parser.add_argument("username", help="Username of the user")
+    parser.add_argument("--purge", action="store_true", help="Completely purge the user from the system (repositories, membership, etc.)")
     parser.add_argument("--server", default="localhost", help="Server hostname with port (default: localhost)")
     
     args = parser.parse_args()
@@ -18,12 +17,11 @@ def main():
         "Content-Type": "application/json"
     }
     data = {
-        "Username": args.username,
-        "Password": args.password,
-        "Email": args.email
+        "username": args.username,
+        "purge": args.purge
     }
 
-    response = requests.post(url, headers=headers, data=json.dumps(data))
+    response = requests.delete(url, headers=headers, data=json.dumps(data))
     
     print(response.status_code)
     print(response.text)

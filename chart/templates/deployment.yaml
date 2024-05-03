@@ -40,11 +40,11 @@ spec:
           livenessProbe:
             httpGet:
               path: /liveness
-              port: 8000
+              port: 9000
           readinessProbe:
             httpGet:
               path: /readiness
-              port: 8000
+              port: 9000
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

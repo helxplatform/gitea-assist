@@ -46,10 +46,15 @@ type MergeContext struct {
 	ForkIsEmpty      bool
 }
 
-type UserOptions struct {
+type CreateUserOptions struct {
 	Email    string `json:"email"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type DeleteUserOptions struct {
+	Username string `json:"username"`
+	Purge    bool   `json:"purge"`
 }
 
 type RepoOptions struct {
@@ -220,6 +225,40 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 	return forks, nil
 }
 
+func getRemoteUrlFromRepo(repo *api.Repository) string {
+	return repo.CloneURL
+}
+
+func getRemoteUrl(giteaBaseURL, adminUsername, adminPassword, owner string, repo string) (string, error) {
+	client := &http.Client{}
+	repoURL := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repo)
+	req, err := http.NewRequest("GET", repoURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("could not retrieve remote url %v", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var responseError map[string]interface{}
+
+		json.NewDecoder(resp.Body).Decode(&responseError)
+		return "", fmt.Errorf("failed to retrieve remote url; HTTP status code: %d, message: %s", resp.StatusCode, responseError["message"])
+	}
+
+	var repository api.Repository
+	json.NewDecoder(resp.Body).Decode(&repository)
+
+	return getRemoteUrlFromRepo(&repository), nil
+}
+
 func transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, owner, repo, newOwner string) error {
 	options := api.TransferRepoOption{
 		NewOwner: newOwner,
@@ -361,9 +400,40 @@ func addUserToTeam(giteaBaseURL, adminUsername, adminPassword, orgName, teamName
 
 	if resp.StatusCode != http.StatusNoContent {
 		var responseError map[string]interface{}
-
+		log.Printf("%v %v", resp.StatusCode, reqURL)
 		json.NewDecoder(resp.Body).Decode(&responseError)
 		return fmt.Errorf("failed to add user to team; HTTP status code: %d, message: %s", resp.StatusCode, responseError["message"])
+	}
+
+	return nil
+}
+
+func deleteUserFromTeam(giteaBaseURL, adminUsername, adminPassword, orgName, teamName, userName string) error {
+	teamID, err := getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, teamName)
+	if err != nil {
+		return err
+	}
+
+	reqURL := fmt.Sprintf("%s/teams/%d/members/%s", giteaBaseURL, teamID, userName)
+	req, err := http.NewRequest("DELETE", reqURL, bytes.NewBuffer(nil))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		var responseError map[string]interface{}
+		log.Printf("%v %v", resp.StatusCode, reqURL)
+		json.NewDecoder(resp.Body).Decode(&responseError)
+		return fmt.Errorf("failed to delete user from team; HTTP status code: %d, message: %s", resp.StatusCode, responseError["message"])
 	}
 
 	return nil
@@ -374,7 +444,7 @@ func createWebhook(giteaBaseURL, adminUsername, adminPassword, owner, repo, full
 
 	config := api.CreateHookOptionConfig{
 		"content_type": "json",
-		"url":          "http://" + fullname + ":8000/onPush",
+		"url":          "http://" + fullname + ":9000/onPush",
 	}
 
 	options := api.CreateHookOption{
@@ -849,10 +919,13 @@ func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, 
 			Password string `json:"password" binding:"Required;MaxSize(255)"`
 		}
 	*/
+	mustChangePassword := false
 	user := api.CreateUserOption{
 		Username: username,
 		Email:    email,
 		Password: password,
+		// I have no idea why this wants a pointer to a bool...
+		MustChangePassword: &mustChangePassword,
 	}
 
 	jsonData, _ := json.Marshal(user)
@@ -884,7 +957,7 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var options UserOptions
+	var options CreateUserOptions
 	err = json.Unmarshal(body, &options)
 	if err != nil {
 		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
@@ -907,6 +980,62 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			log.Printf("User creation failed %v", err)
 		} else {
 			log.Printf("User creation failed")
+		}
+	}
+}
+
+func deleteUser(giteaBaseURL, adminUsername, adminPassword, username string, purge bool) (bool, error) {
+	url := fmt.Sprintf("%s/admin/users/%s?purge=%t", giteaBaseURL, username, purge)
+	req, _ := http.NewRequest("DELETE", url, nil)
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		log.Println("Failed to delete user:", string(body))
+		return false, nil
+	}
+	return true, nil
+}
+
+func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options DeleteUserOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	if options.Username == "" {
+		http.Error(w, "Username must be provided", http.StatusBadRequest)
+		return
+	}
+
+	log.Println("Received User Data:", options)
+	if success, err := deleteUser(access.URL, access.Username, access.Password, options.Username, options.Purge); success {
+		// Respond to the client
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("User deleted successfully"))
+	} else {
+		http.Error(w, "User deletion failed", http.StatusBadRequest)
+		if err != nil {
+			log.Printf("User deletion failed %v", err)
+		} else {
+			log.Printf("User deletion failed")
 		}
 	}
 }
@@ -966,12 +1095,14 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 		handleCreateUser(w, r)
 	case http.MethodGet:
 		handleGetUser(w, r)
+	case http.MethodDelete:
+		handleDeleteUser(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, name, description string, private bool) error {
+func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, name, description string, private bool) (*api.Repository, error) {
 	data := api.CreateRepoOption{
 		Name:        name,
 		Description: description,
@@ -982,21 +1113,25 @@ func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, nam
 
 	req, err := http.NewRequest("POST", giteaBaseURL+"/admin/users/"+username+"/repos", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
-	return nil
+
+	var repository api.Repository
+	json.NewDecoder(resp.Body).Decode(&repository)
+
+	return &repository, nil
 }
 
 func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
@@ -1021,10 +1156,11 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Println("Received Repo Data:", options)
-	if err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); err == nil {
+	if repository, err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); err == nil {
 		if err := createWebhook(access.URL, access.Username, access.Password, options.Owner, options.Name, fullname); err == nil {
+			remoteUrl := getRemoteUrlFromRepo(repository)
 			w.WriteHeader(http.StatusCreated)
-			w.Write([]byte("Repo created successfully"))
+			w.Write([]byte(remoteUrl))
 		} else {
 			http.Error(w, "Webhook creation failed", http.StatusBadRequest)
 			log.Printf("Webhook creation failed %v", err)
@@ -1033,10 +1169,6 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Repo creation failed", http.StatusBadRequest)
 		log.Printf("Repo creation failed %v", err)
 	}
-
-	// Respond to the client
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte("Repo created successfully"))
 }
 
 func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) ([]byte, error) {
@@ -1076,6 +1208,40 @@ func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName 
 	return bodyBytes, nil
 }
 
+func downloadRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string, commit string) ([]byte, error) {
+	// Build the Gitea API URL for downloading the repo archive
+	url := fmt.Sprintf("%s/repos/%s/%s/archive/%s.zip", giteaBaseURL, owner, repoName, commit)
+
+	// Build request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return nil, err
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return nil, fmt.Errorf("HTTP Error: %v", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error downloading repo from Gitea %v %v", resp.StatusCode, url)
+		return nil, fmt.Errorf("HTTP Error: %v", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	return bodyBytes, nil
+}
+
 func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	repoName := r.URL.Query().Get("name")
 	owner := r.URL.Query().Get("owner")
@@ -1091,6 +1257,23 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+	commit := r.URL.Query().Get("commit")
+	if repoName == "" || owner == "" {
+		http.Error(w, "Repo name and owner must be provided", http.StatusBadRequest)
+		return
+	}
+	if resp, err := downloadRepoForUser(access.URL, access.Username, access.Password, owner, repoName, commit); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write(resp)
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+}
+
 func handleRepo(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
@@ -1102,7 +1285,7 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo, user string) error {
+func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo, user string) (*api.Repository, error) {
 	/*
 		reenable this once gitea bug #26234 is fixed
 
@@ -1121,7 +1304,7 @@ func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, re
 
 	req, err := http.NewRequest("POST", giteaBaseURL+"/repos/"+owner+"/"+repo+"/forks", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req.Header.Add("Content-Type", "application/json")
@@ -1129,26 +1312,30 @@ func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, re
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusAccepted {
 		if err := transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, adminUsername, tmpRepoName, user); err != nil {
 			log.Printf("transfer ownership of %s to %s failed: %v", tmpRepoName, user, err)
-			return err
+			return nil, err
 		}
 		if err := renameRepo(giteaBaseURL, adminUsername, adminPassword, user, tmpRepoName, repo); err != nil {
 			log.Printf("rename of repo from %s to %s failed %v", tmpRepoName, repo, err)
-			return err
+			return nil, err
 		}
 		if err := createWebhook(access.URL, access.Username, access.Password, user, repo, fullname); err != nil {
 			log.Printf("create webhook for repo %s failed %v", repo, err)
-			return err
+			return nil, err
 		}
-		return nil
+
+		var repository api.Repository
+		json.NewDecoder(resp.Body).Decode(&repository)
+
+		return &repository, nil
 	} else {
-		return fmt.Errorf("fork failed with code %v", resp.StatusCode)
+		return nil, fmt.Errorf("fork failed with code %v", resp.StatusCode)
 	}
 }
 
@@ -1168,9 +1355,15 @@ func handleCreateFork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Println("Forking repo:", options.Repo, "for user:", options.NewOwner)
-	if err := forkRepositoryForUser(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); err == nil {
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(fmt.Sprintf("Repo %s forked successfully for user %s", options.Repo, options.NewOwner)))
+	if _, err := forkRepositoryForUser(access.URL, access.Username, access.Password, options.Owner, options.Repo, options.NewOwner); err == nil {
+		// Note: we can't use getRemoteUrlFromRepo since the returned repo remote is incorrect due to the way we handle forking w/ rename.
+		if remoteUrl, err := getRemoteUrl(access.URL, access.Username, access.Password, options.NewOwner, options.Repo); err == nil {
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(remoteUrl))
+		} else {
+			http.Error(w, "Fork failed", http.StatusBadRequest)
+			log.Printf("Repo creation failed %v", err)
+		}
 	} else {
 		http.Error(w, "Fork failed", http.StatusBadRequest)
 		if err != nil {
@@ -1403,6 +1596,7 @@ func handleAddMember(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("User added to organization"))
 	} else {
+		log.Printf("%v", err)
 		http.Error(w, "Add user failed", http.StatusInternalServerError)
 	}
 }
@@ -1431,7 +1625,7 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 
 // main initializes an HTTP server with endpoints for processing push events,
 // checking service readiness, and determining service liveness. The server
-// listens on port 8000. Logging is utilized to indicate the server's start
+// listens on port 8900. Logging is utilized to indicate the server's start
 // and to capture any fatal errors.
 func main() {
 	//mux := http.NewServeMux()
@@ -1439,6 +1633,7 @@ func main() {
 	r.HandleFunc("/onPush", webhookHandler)
 	r.HandleFunc("/users", handleUser)
 	r.HandleFunc("/repos", handleRepo)
+	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
 	r.HandleFunc("/forks", handleFork)
 	r.HandleFunc("/orgs", handleOrg)
 	r.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
@@ -1446,6 +1641,6 @@ func main() {
 	r.HandleFunc("/readiness", readinessHandler)
 	r.HandleFunc("/liveness", livenessHandler)
 	http.Handle("/", r)
-	log.Println("Server started on :8000")
-	log.Fatal(http.ListenAndServe(":8000", nil))
+	log.Println("Server started on :9000")
+	log.Fatal(http.ListenAndServe(":9000", nil))
 }
