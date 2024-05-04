@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -62,6 +63,12 @@ type RepoOptions struct {
 	Description string `json:"description"`
 	Owner       string `json:"owner"`
 	Private     bool   `json:"private"`
+}
+
+type PatchRepoOptions struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Private     bool   `json:"private,omitempty"`
 }
 
 type ForkOptions struct {
@@ -131,6 +138,60 @@ func getFullname() (string, error) {
 		return "", err
 	}
 
+}
+
+func downloadPathFromZip(zipBytes []byte, path string) ([]byte, error) {
+	reader := bytes.NewReader(zipBytes)
+	zipReader, err := zip.NewReader(reader, int64(len(zipBytes)))
+	if err != nil {
+		log.Printf("unable to parse zipfile from bytes for path %v", path)
+		return nil, err
+	}
+	buf := new(bytes.Buffer)
+	zipWriter := zip.NewWriter(buf)
+
+	for _, zFile := range zipReader.File {
+		if strings.HasPrefix(strings.ToLower(zFile.Name), strings.ToLower(path)) {
+			fileReader, err := zFile.Open()
+			if err != nil {
+				log.Printf("failed to open reader for %v", zFile)
+			}
+			defer fileReader.Close()
+
+			// We don't use TrimPrefix here because it's case-sensitive and we don't care about case
+			trimmedFilePath := zFile.Name[len(path):]
+			// Remove leading slash
+			trimmedFilePath = strings.TrimPrefix(trimmedFilePath, "/")
+
+			// This may corrupt ZIP archive utilities if not skipped
+			// (e.g. this will break for MacOS's Archive Utility)
+			if trimmedFilePath == "" {
+				continue
+			}
+
+			header := &zip.FileHeader{
+				Name:     trimmedFilePath,
+				Method:   zip.Store,
+				Modified: zFile.Modified,
+			}
+
+			fileWriter, err := zipWriter.CreateHeader(header)
+			if err != nil {
+				log.Printf("failed to create header for %v", zFile.Name)
+			}
+
+			if _, err := io.Copy(fileWriter, fileReader); err != nil {
+				log.Printf("failed to write %v to new zip file", zFile.Name)
+				return nil, err
+			}
+
+		}
+	}
+
+	if err = zipWriter.Close(); err != nil {
+		log.Printf("failed to close zip writer %v", err)
+	}
+	return buf.Bytes(), nil
 }
 
 func createTokenForUser(giteaBaseURL, adminUsername, adminPassword, username, name string, scopes []string) (*api.AccessToken, error) {
@@ -1028,7 +1089,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received User Data:", options)
 	if success, err := deleteUser(access.URL, access.Username, access.Password, options.Username, options.Purge); success {
 		// Respond to the client
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("User deleted successfully"))
 	} else {
 		http.Error(w, "User deletion failed", http.StatusBadRequest)
@@ -1208,9 +1269,9 @@ func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName 
 	return bodyBytes, nil
 }
 
-func downloadRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string, commit string) ([]byte, error) {
+func downloadRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, treeishId, path string) ([]byte, error) {
 	// Build the Gitea API URL for downloading the repo archive
-	url := fmt.Sprintf("%s/repos/%s/%s/archive/%s.zip", giteaBaseURL, owner, repoName, commit)
+	url := fmt.Sprintf("%s/repos/%s/%s/archive/%s.zip", giteaBaseURL, owner, repoName, treeishId)
 
 	// Build request
 	req, err := http.NewRequest("GET", url, nil)
@@ -1239,7 +1300,81 @@ func downloadRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo
 		return nil, err
 	}
 
-	return bodyBytes, nil
+	// Gitea does not currently support the `path` option
+	// https://github.com/go-gitea/gitea/issues/4478
+	archiveBytes, err := downloadPathFromZip(bodyBytes, fmt.Sprintf("%v/%v", repoName, path))
+	if err != nil {
+		log.Printf("Error extracting path from zipfile %v", err)
+		return nil, err
+	}
+	return archiveBytes, err
+}
+
+func modifyRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string, newName *string, newDescription *string, newPrivate *bool) (*api.Repository, error) {
+	data := api.EditRepoOption{
+		Name:        newName,
+		Description: newDescription,
+		Private:     newPrivate,
+	}
+
+	jsonData, _ := json.Marshal(data)
+
+	url := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repoName)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+
+	var repository api.Repository
+	json.NewDecoder(resp.Body).Decode(&repository)
+
+	return &repository, nil
+}
+
+func handlePatchRepo(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+	if repoName == "" || owner == "" {
+		http.Error(w, "Repo name and owner must be provided", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options PatchRepoOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("Received Repo Data:", options)
+	if repository, err := modifyRepoForUser(access.URL, access.Username, access.Password, owner, repoName, &options.Name, &options.Description, &options.Private); err == nil {
+		remoteUrl := getRemoteUrlFromRepo(repository)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(remoteUrl))
+	} else {
+		http.Error(w, "Repo modify failed", http.StatusBadRequest)
+		log.Printf("Repo modify failed %v", err)
+	}
 }
 
 func handleGetRepo(w http.ResponseWriter, r *http.Request) {
@@ -1260,12 +1395,14 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
 	repoName := r.URL.Query().Get("name")
 	owner := r.URL.Query().Get("owner")
-	commit := r.URL.Query().Get("commit")
+	treeishId := r.URL.Query().Get("treeish_id")
+	path := r.URL.Query().Get("path")
+
 	if repoName == "" || owner == "" {
 		http.Error(w, "Repo name and owner must be provided", http.StatusBadRequest)
 		return
 	}
-	if resp, err := downloadRepoForUser(access.URL, access.Username, access.Password, owner, repoName, commit); err == nil {
+	if resp, err := downloadRepoForUser(access.URL, access.Username, access.Password, owner, repoName, treeishId, path); err == nil {
 		w.WriteHeader(http.StatusOK)
 		w.Write(resp)
 	} else {
@@ -1280,6 +1417,8 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 		handleCreateRepo(w, r)
 	case http.MethodGet:
 		handleGetRepo(w, r)
+	case http.MethodPatch:
+		handlePatchRepo(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
