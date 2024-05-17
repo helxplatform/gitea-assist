@@ -65,6 +65,14 @@ type RepoOptions struct {
 	Private     bool   `json:"private"`
 }
 
+type ModifyRepoOptions struct {
+	Name    string                     `json:"name"`
+	Owner   string                     `json:"owner"`
+	Branch  string                     `json:"branch"`
+	Message string                     `json:"message"`
+	Files   []*api.ChangeFileOperation `json:"files"`
+}
+
 type PatchRepoOptions struct {
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
@@ -1405,6 +1413,84 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, branch, message string, files []*api.ChangeFileOperation) (string, error) {
+	// Build the Gitea API URL for downloading the repo archive
+	url := fmt.Sprintf("%s/repos/%s/%s/contents", giteaBaseURL, owner, repoName)
+
+	data := api.ChangeFilesOptions{
+		FileOptions: api.FileOptions{
+			BranchName: branch,
+			Author:     api.Identity{Name: adminUsername},
+			Committer:  api.Identity{Name: adminUsername},
+			Message:    message,
+		},
+		Files: files,
+	}
+
+	jsonData, _ := json.Marshal(data)
+
+	// Build request
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return "", err
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return "", fmt.Errorf("HTTP Error: %v", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		log.Printf("Error modifying repo from Gitea %v %v", resp.StatusCode, url)
+		return "", fmt.Errorf("HTTP Error: %v", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return "", err
+	}
+	var filesResponse api.FilesResponse
+	err = json.Unmarshal(bodyBytes, &filesResponse)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return "", err
+	}
+
+	return filesResponse.Commit.SHA, nil
+}
+
+func handleModifyRepoFiles(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options ModifyRepoOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	if commitHash, err := modifyRepoFilesForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Branch, options.Message, options.Files); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(commitHash))
+	} else {
+		http.Error(w, "Repo modify failed", http.StatusBadRequest)
+		log.Printf("Repo modify failed %v", err)
+	}
+}
+
 func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
 	repoName := r.URL.Query().Get("name")
 	owner := r.URL.Query().Get("owner")
@@ -1922,6 +2008,7 @@ func main() {
 	r.HandleFunc("/users", handleUser)
 	r.HandleFunc("/repos", handleRepo)
 	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
+	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
 	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
 	r.HandleFunc("/forks", handleFork)
 	r.HandleFunc("/orgs", handleOrg)
