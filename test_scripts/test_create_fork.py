@@ -13,7 +13,7 @@ def main():
     
     args = parser.parse_args()
 
-    url = f"http://{args.server}:8000/forks"
+    url = f"http://{args.server}:9000/forks"
     headers = {
         "Content-Type": "application/json"
     }

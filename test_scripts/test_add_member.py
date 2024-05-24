@@ -11,7 +11,7 @@ def main():
     
     args = parser.parse_args()
 
-    url = f"http://{args.server}:8000/orgs/{args.org_name}/members/{args.user_name}"
+    url = f"http://{args.server}:9000/orgs/{args.org_name}/members/{args.user_name}"
     
     response = requests.put(url)
     

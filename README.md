@@ -37,7 +37,7 @@ To run the application, simply execute:
 go run main.go
 ```
 
-This will start an HTTP server on port 8000.
+This will start an HTTP server on port 9000.
 
 ## Kubernetes Secret Creator for Gitea Credentials (mk_passwd.py)
 

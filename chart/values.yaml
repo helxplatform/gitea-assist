@@ -38,7 +38,7 @@ securityContext: {}
 
 service:
   type: ClusterIP
-  port: 8000
+  port: 9000
 
 ingress:
   enabled: false

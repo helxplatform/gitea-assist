@@ -11,7 +11,7 @@ def main():
     
     args = parser.parse_args()
 
-    url = f"http://{args.server}:8000/forks?name={args.repo_name}&owner={args.owner}"
+    url = f"http://{args.server}:9000/forks?name={args.repo_name}&owner={args.owner}"
     
     response = requests.get(url)
     
