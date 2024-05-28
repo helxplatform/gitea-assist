@@ -92,6 +92,12 @@ type RemoveCollaboratorOptions struct {
 	CollaboratorName string `json:"collaborator_name"`
 }
 
+type CreateSSHOptions struct {
+	KeyName  string `json:"key_name"`
+	Key      string `json:"key"`
+	Username string `json:"username"`
+}
+
 type ForkOptions struct {
 	Owner    string `json:"owner"`
 	NewOwner string `json:"newOwner"`
@@ -1184,6 +1190,90 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, key, name string) error {
+	data := api.CreateKeyOption{
+		Key:      key,
+		Title:    name,
+		ReadOnly: false,
+	}
+
+	jsonData, _ := json.Marshal(data)
+
+	req, err := http.NewRequest("POST", giteaBaseURL+"/admin/users/"+username+"/keys", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP Error: %d %s", resp.StatusCode, b)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return err
+	}
+
+	var publicKeyResponse api.PublicKey
+	err = json.Unmarshal(bodyBytes, &publicKeyResponse)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return err
+	}
+
+	fmt.Println(publicKeyResponse.ID, publicKeyResponse.Key)
+
+	return nil
+}
+
+func handleCreateUserSSHKey(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options CreateSSHOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	if options.Key == "" || options.KeyName == "" || options.Username == "" {
+		http.Error(w, "Key, KeyName, and Username must be provided to create the SSH key", http.StatusBadRequest)
+		return
+	}
+
+	if err := createSSHKeyForUser(access.URL, access.Username, access.Password, options.Username, options.Key, options.KeyName); err == nil {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("Successfully created SSH key"))
+	} else {
+		http.Error(w, "Key creation failed", http.StatusBadRequest)
+		log.Printf("Key creation failed %v", err)
+	}
+}
+
+func handleUserSsh(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		handleCreateUserSSHKey(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func createRepoForUser(giteaBaseURL, adminUsername, adminPassword, username, name, description string, private bool) (*api.Repository, error) {
 	data := api.CreateRepoOption{
 		Name:        name,
@@ -2006,6 +2096,7 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/onPush", webhookHandler)
 	r.HandleFunc("/users", handleUser)
+	r.HandleFunc("/users/ssh", handleUserSsh)
 	r.HandleFunc("/repos", handleRepo)
 	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
 	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
