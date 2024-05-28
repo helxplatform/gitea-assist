@@ -314,7 +314,7 @@ func findForks(repoURL, username, password string) ([]api.Repository, error) {
 }
 
 func getRemoteUrlFromRepo(repo *api.Repository) string {
-	return repo.CloneURL
+	return repo.SSHURL
 }
 
 func getRemoteUrl(giteaBaseURL, adminUsername, adminPassword, owner string, repo string) (string, error) {
