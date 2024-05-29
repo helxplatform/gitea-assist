@@ -1190,11 +1190,117 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]api.PublicKey, error) {
+	req, err := http.NewRequest("GET", giteaBaseURL+"/users/"+username+"/keys/", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	var publicKeys []api.PublicKey
+	err = json.Unmarshal(bodyBytes, &publicKeys)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	return publicKeys, nil
+}
+
+func handleGetUserSSHKeys(w http.ResponseWriter, r *http.Request) {
+	username := r.URL.Query().Get("username")
+	if username == "" {
+		http.Error(w, "Username must be provided to list SSH keys", http.StatusBadRequest)
+		return
+	}
+
+	if keys, err := getSSHKeysForUser(access.URL, access.Username, access.Password, username); err == nil {
+		jsonData, _ := json.Marshal(keys)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(jsonData))
+	} else {
+		http.Error(w, "Failed to list keys", http.StatusBadRequest)
+		log.Printf("Failed to list keys %v", err)
+	}
+}
+
+func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name string) error {
+	keys, err := getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username)
+	if err != nil {
+		return err
+	}
+
+	var id int64 = -1
+	for _, key := range keys {
+		if key.Title == name {
+			id = key.ID
+			break
+		}
+	}
+	if id == -1 {
+		return fmt.Errorf("SSH key does not exist for the user")
+	}
+
+	url := fmt.Sprintf("%s/admin/users/%s/keys/%d", giteaBaseURL, username, id)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != 404 {
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func handleDeleteUserSSHKey(w http.ResponseWriter, r *http.Request) {
+	keyName := r.URL.Query().Get("key_name")
+	username := r.URL.Query().Get("username")
+	if keyName == "" || username == "" {
+		http.Error(w, "Key name and username must be provided to delete the SSH key", http.StatusBadRequest)
+		return
+	}
+
+	if err := deleteSSHKeyForUser(access.URL, access.Username, access.Password, username, keyName); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Successfully deleted SSH key"))
+	} else {
+		http.Error(w, "Key deletion failed", http.StatusBadRequest)
+		log.Printf("Key deletion failed %v", err)
+	}
+}
+
 func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, key, name string) error {
+	if err := deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name); err != nil {
+
+	}
+
 	data := api.CreateKeyOption{
 		Key:      key,
 		Title:    name,
-		ReadOnly: false,
+		ReadOnly: true,
 	}
 
 	jsonData, _ := json.Marshal(data)
@@ -1213,8 +1319,7 @@ func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, k
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP Error: %d %s", resp.StatusCode, b)
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
@@ -1267,8 +1372,12 @@ func handleCreateUserSSHKey(w http.ResponseWriter, r *http.Request) {
 
 func handleUserSsh(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodGet:
+		handleGetUserSSHKeys(w, r)
 	case http.MethodPost:
 		handleCreateUserSSHKey(w, r)
+	case http.MethodDelete:
+		handleDeleteUserSSHKey(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
