@@ -1251,7 +1251,7 @@ func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, n
 		}
 	}
 	if id == -1 {
-		return fmt.Errorf("SSH key does not exist for the user")
+		return nil
 	}
 
 	url := fmt.Sprintf("%s/admin/users/%s/keys/%d", giteaBaseURL, username, id)
@@ -1268,7 +1268,7 @@ func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, n
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != 404 {
+	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
 
@@ -1293,8 +1293,9 @@ func handleDeleteUserSSHKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, key, name string) error {
-	if err := deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name); err != nil {
-
+	err := deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name)
+	if err != nil {
+		return err
 	}
 
 	data := api.CreateKeyOption{
