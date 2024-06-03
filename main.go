@@ -1413,9 +1413,54 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func getRepoFileSHA(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", giteaBaseURL, owner, repoName, path, ref)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return "", err
+	}
+	var contentsResponse api.ContentsResponse
+	err = json.Unmarshal(bodyBytes, &contentsResponse)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return "", err
+	}
+
+	return contentsResponse.SHA, nil
+}
+
 func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, branch, message string, files []*api.ChangeFileOperation) (string, error) {
 	// Build the Gitea API URL for downloading the repo archive
 	url := fmt.Sprintf("%s/repos/%s/%s/contents", giteaBaseURL, owner, repoName)
+
+	for _, file := range files {
+		if file.Operation != "create" {
+			sha, err := getRepoFileSHA(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
+			if err != nil {
+				log.Printf("Error getting SHA of '%v' from Gitea %v", file.Path, err)
+				return "", err
+			}
+			file.SHA = sha
+		}
+	}
 
 	data := api.ChangeFilesOptions{
 		FileOptions: api.FileOptions{
