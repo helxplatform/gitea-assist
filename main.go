@@ -104,6 +104,13 @@ type ForkOptions struct {
 	Repo     string `json:"repo"`
 }
 
+type AddHookOptions struct {
+	Name    string `json:"name"`
+	Owner   string `json:"owner"`
+	HookId  string `json:"hook_id"`
+	Content string `json:"content"`
+}
+
 type OrgOptions struct {
 	OrgName string `json:"org_name"`
 }
@@ -1904,6 +1911,85 @@ func handleRepoCollaborator(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func addHookToRepo(giteaBaseURL, adminUsername, adminPassword, owner, repoName, hookId, content string) error {
+
+	// Build the Gitea API URL for fetching the repo details
+	url := fmt.Sprintf("%s/repos/%s/%s/hooks/git/%s", giteaBaseURL, owner, repoName, hookId)
+
+	option := api.EditGitHookOption{
+		Content: content,
+	}
+	jsonData, _ := json.Marshal(option)
+	// Empty permission string is treated the same as omitting it by the Gitea API here.
+	// Create a new request
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+	log.Println(url)
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return err
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	// Check if the request was successful
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error adding Git hook from Gitea %v", resp.StatusCode)
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func handleAddHook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	var options AddHookOptions
+	err = json.Unmarshal(body, &options)
+	if err != nil {
+		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		return
+	}
+
+	defer r.Body.Close()
+	if err != nil {
+		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		return
+	}
+
+	if options.Name == "" || options.Owner == "" || options.HookId == "" {
+		http.Error(w, "Repo name, owner, and hook id must be provided", http.StatusBadRequest)
+		return
+	}
+	if err := addHookToRepo(access.URL, access.Username, access.Password, options.Owner, options.Name, options.HookId, options.Content); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Hook added successfully"))
+	} else {
+		http.Error(w, "Failed to add hook", http.StatusInternalServerError)
+	}
+}
+
+func handleRepoHook(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPut:
+		handleAddHook(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, repo, user string) (*api.Repository, error) {
 	/*
 		reenable this once gitea bug #26234 is fixed
@@ -2254,6 +2340,7 @@ func main() {
 	r.HandleFunc("/users/ssh", handleUserSsh)
 	r.HandleFunc("/repos", handleRepo)
 	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
+	r.HandleFunc("/repos/hooks", handleRepoHook)
 	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
 	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
 	r.HandleFunc("/forks", handleFork)
