@@ -1268,7 +1268,7 @@ func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, n
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != 404 {
 		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
 
