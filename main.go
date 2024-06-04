@@ -1967,7 +1967,8 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Received Org Data:", options)
 	if err := createOrg(access.URL, access.Username, access.Password, options.OrgName); err == nil {
-		if err := createTeam(access.URL, access.Username, access.Password, options.OrgName, options.OrgName, "Primary Team for "+options.OrgName); err == nil {
+		teamName := "default" // must be less than 30 chars
+		if err := createTeam(access.URL, access.Username, access.Password, options.OrgName, teamName, "Primary Team for "+options.OrgName); err == nil {
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte("Org created successfully"))
 		} else {
