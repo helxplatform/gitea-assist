@@ -27,6 +27,8 @@ import (
 	"github.com/gorilla/mux"
 )
 
+const DEFAULT_TEAM_NAME = "default"
+
 type GiteaAccess struct {
 	URL      string
 	Username string
@@ -2212,7 +2214,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Received Org Data:", options)
 	if err := createOrg(access.URL, access.Username, access.Password, options.OrgName); err == nil {
-		if err := createTeam(access.URL, access.Username, access.Password, options.OrgName, options.OrgName, "Primary Team for "+options.OrgName); err == nil {
+		if err := createTeam(access.URL, access.Username, access.Password, options.OrgName, DEFAULT_TEAM_NAME, "Primary Team for "+options.OrgName); err == nil {
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte("Org created successfully"))
 		} else {
@@ -2237,7 +2239,7 @@ func handleOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func getOrgMembers(giteaBaseURL, adminUsername, adminPassword, orgName string) ([]api.User, error) {
-	teamID, err := getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, orgName)
+	teamID, err := getTeamID(giteaBaseURL, adminUsername, adminPassword, orgName, DEFAULT_TEAM_NAME)
 	if err != nil {
 		return nil, err
 	}
@@ -2296,7 +2298,7 @@ func handleAddMember(w http.ResponseWriter, r *http.Request) {
 	orgName := vars["orgName"]
 	userName := vars["userName"]
 
-	if err := addUserToTeam(access.URL, access.Username, access.Password, orgName, orgName, userName); err == nil {
+	if err := addUserToTeam(access.URL, access.Username, access.Password, orgName, DEFAULT_TEAM_NAME, userName); err == nil {
 		// Respond to the client
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("User added to organization"))
