@@ -1448,14 +1448,17 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println("Received Repo Data:", options)
 	if repository, err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); err == nil {
-		if err := createWebhook(access.URL, access.Username, access.Password, options.Owner, options.Name, fullname); err == nil {
-			remoteUrl := getRemoteUrlFromRepo(repository)
-			w.WriteHeader(http.StatusCreated)
-			w.Write([]byte(remoteUrl))
-		} else {
-			http.Error(w, "Webhook creation failed", http.StatusBadRequest)
-			log.Printf("Webhook creation failed %v", err)
-		}
+		// if err := createWebhook(access.URL, access.Username, access.Password, options.Owner, options.Name, fullname); err == nil {
+		// 	remoteUrl := getRemoteUrlFromRepo(repository)
+		// 	w.WriteHeader(http.StatusCreated)
+		// 	w.Write([]byte(remoteUrl))
+		// } else {
+		// 	http.Error(w, "Webhook creation failed", http.StatusBadRequest)
+		// 	log.Printf("Webhook creation failed %v", err)
+		// }
+		remoteUrl := getRemoteUrlFromRepo(repository)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(remoteUrl))
 	} else {
 		http.Error(w, "Repo creation failed", http.StatusBadRequest)
 		log.Printf("Repo creation failed %v", err)
@@ -2133,16 +2136,20 @@ func forkRepositoryForUser(giteaBaseURL, adminUsername, adminPassword, owner, re
 	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusAccepted {
 		if err := transferRepoOwnership(giteaBaseURL, adminUsername, adminPassword, adminUsername, tmpRepoName, user); err != nil {
 			log.Printf("transfer ownership of %s to %s failed: %v", tmpRepoName, user, err)
+			// We failed to transfer, so fork still on admin account
+			deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, adminUsername, tmpRepoName)
 			return nil, err
 		}
 		if err := renameRepo(giteaBaseURL, adminUsername, adminPassword, user, tmpRepoName, repo); err != nil {
 			log.Printf("rename of repo from %s to %s failed %v", tmpRepoName, repo, err)
+			// Transferred but failed to rename
+			deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, user, tmpRepoName)
 			return nil, err
 		}
-		if err := createWebhook(access.URL, access.Username, access.Password, user, repo, fullname); err != nil {
-			log.Printf("create webhook for repo %s failed %v", repo, err)
-			return nil, err
-		}
+		// if err := createWebhook(access.URL, access.Username, access.Password, user, repo, fullname); err != nil {
+		// 	log.Printf("create webhook for repo %s failed %v", repo, err)
+		// 	return nil, err
+		// }
 
 		var repository api.Repository
 		json.NewDecoder(resp.Body).Decode(&repository)
@@ -2177,6 +2184,7 @@ func handleCreateFork(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "Fork failed", http.StatusBadRequest)
 			log.Printf("Repo creation failed %v", err)
+			deleteRepoForUser(access.URL, access.Username, access.Password, options.NewOwner, options.Repo)
 		}
 	} else {
 		http.Error(w, "Fork failed", http.StatusBadRequest)
@@ -2327,6 +2335,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "Org-Team creation failed", http.StatusBadRequest)
 			log.Printf("Org-Team creation failed %v", err)
+			deleteOrg(access.URL, access.Username, access.Password, options.OrgName, true)
 		}
 	} else {
 		http.Error(w, "Org creation failed", http.StatusBadRequest)
