@@ -1822,7 +1822,51 @@ func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
+}
 
+func deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) error {
+
+	// Build the Gitea API URL for fetching the repo details
+	url := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repoName)
+
+	// Create a new request
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return err
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		log.Printf("Error deleting repo from Gitea %v", resp.StatusCode)
+		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+
+	if repoName == "" || owner == "" {
+		http.Error(w, "Repo name and owner must be provided", http.StatusBadRequest)
+		return
+	}
+	if err := deleteRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Successfully deleted repository"))
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 }
 
 func handleRepo(w http.ResponseWriter, r *http.Request) {
@@ -1833,6 +1877,8 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 		handleGetRepo(w, r)
 	case http.MethodPatch:
 		handlePatchRepo(w, r)
+	case http.MethodDelete:
+		handleDeleteRepo(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -2289,32 +2335,33 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func deleteOrg(giteaBaseURL, adminUsername, adminPassword, orgName string, purge bool) error {
-	// if purge {
+	if purge {
+		repos, err := listReposForUser(giteaBaseURL, adminUsername, adminPassword, orgName)
+		if err != nil {
+			return err
+		}
+		for _, repository := range repos {
+			deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, orgName, repository.Name)
+		}
+	}
 
-	// }
+	req, err := http.NewRequest("DELETE", giteaBaseURL+"/orgs/"+orgName, nil)
+	if err != nil {
+		return err
+	}
 
-	// req, err := http.NewRequest("GET", giteaBaseURL+"/orgs/"+orgName, nil)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 
-	// req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-	// resp, err := http.DefaultClient.Do(req)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("failed to delete organization; HTTP status code: %d", resp.StatusCode)
+	}
 
-	// if resp.StatusCode != http.StatusOK {
-	// 	return nil, fmt.Errorf("failed to get organization details; HTTP status code: %d", resp.StatusCode)
-	// }
-
-	// var orgDetails api.Organization
-
-	// json.NewDecoder(resp.Body).Decode(&orgDetails)
-
-	// return &orgDetails, nil
 	return nil
 }
 
