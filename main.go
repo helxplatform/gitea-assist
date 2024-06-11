@@ -1462,7 +1462,50 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) ([]byte, error) {
+func listReposForUser(giteaBaseURL, adminUsername, adminPassword, owner string) ([]api.Repository, error) {
+	// Build the Gitea API URL for fetching the repo details
+	url := fmt.Sprintf("%s/users/%s/repos", giteaBaseURL, owner)
+
+	// Create a new request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return nil, err
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	// Check if the request was successful
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error fetching repos from Gitea %v", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+	}
+
+	// Read the response body from Gitea into a byte slice
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	var repoList []api.Repository
+	err = json.Unmarshal(bodyBytes, &repoList)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	return repoList, nil
+}
+
+func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) (*api.Repository, error) {
 
 	// Build the Gitea API URL for fetching the repo details
 	url := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repoName)
@@ -1496,7 +1539,14 @@ func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName 
 		return nil, err
 	}
 
-	return bodyBytes, nil
+	var repository api.Repository
+	err = json.Unmarshal(bodyBytes, &repository)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, err
+	}
+
+	return &repository, nil
 }
 
 func downloadRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, treeishId, path string) ([]byte, error) {
@@ -1610,15 +1660,26 @@ func handlePatchRepo(w http.ResponseWriter, r *http.Request) {
 func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	repoName := r.URL.Query().Get("name")
 	owner := r.URL.Query().Get("owner")
-	if repoName == "" || owner == "" {
-		http.Error(w, "Repo name and owner must be provided", http.StatusBadRequest)
+	if owner == "" {
+		http.Error(w, "Owner must be provided", http.StatusBadRequest)
 		return
 	}
-	if resp, err := getRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
-		w.WriteHeader(http.StatusOK)
-		w.Write(resp)
+	if repoName == "" {
+		if repos, err := listReposForUser(access.URL, access.Username, access.Password, owner); err == nil {
+			jsonData, _ := json.Marshal(repos)
+			w.WriteHeader(http.StatusOK)
+			w.Write(jsonData)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 	} else {
-		w.WriteHeader(http.StatusInternalServerError)
+		if repo, err := getRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
+			jsonData, _ := json.Marshal(*repo)
+			w.WriteHeader(http.StatusOK)
+			w.Write(jsonData)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -2227,10 +2288,60 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func deleteOrg(giteaBaseURL, adminUsername, adminPassword, orgName string, purge bool) error {
+	// if purge {
+
+	// }
+
+	// req, err := http.NewRequest("GET", giteaBaseURL+"/orgs/"+orgName, nil)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// resp, err := http.DefaultClient.Do(req)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// defer resp.Body.Close()
+
+	// if resp.StatusCode != http.StatusOK {
+	// 	return nil, fmt.Errorf("failed to get organization details; HTTP status code: %d", resp.StatusCode)
+	// }
+
+	// var orgDetails api.Organization
+
+	// json.NewDecoder(resp.Body).Decode(&orgDetails)
+
+	// return &orgDetails, nil
+	return nil
+}
+
+func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("org_name")
+	purge := r.URL.Query().Get("purge") == "true"
+
+	if name == "" {
+		http.Error(w, "org_name must be provided", http.StatusBadRequest)
+		return
+	}
+
+	if err := deleteOrg(access.URL, access.Username, access.Password, name, purge); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Successfully deleted org"))
+	} else {
+		log.Printf("failed to delete org %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
 func handleOrg(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		handleCreateOrg(w, r)
+	case http.MethodDelete:
+		handleDeleteOrg(w, r)
 	case http.MethodGet:
 		handleGetOrg(w, r)
 	default:
