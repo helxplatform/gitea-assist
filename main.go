@@ -112,11 +112,11 @@ var access *GiteaAccess
 var forkCounter *AtomicCounter
 var fullname string
 
-// func init() {
-// 	access, _ = getAccess()
-// 	fullname, _ = getFullname()
-// 	forkCounter = &AtomicCounter{}
-// }
+func init() {
+	access, _ = getAccess()
+	fullname, _ = getFullname()
+	forkCounter = &AtomicCounter{}
+}
 
 // Next returns the next number in sequence
 func (ac *AtomicCounter) Next() int64 {
@@ -124,8 +124,9 @@ func (ac *AtomicCounter) Next() int64 {
 }
 
 // Bare minimum auth middleware in lieu of major restructuring.
-// Assumes we are reading a K8S secret mounted file
-// called /etc/assist-admin/gitea-admin
+// Assumes we are reading a K8S secret mounted with the other secrets
+// read in by the init() func at /etc/assist-secret/assist-token
+// This can be prepopulated by the mk_password.py file.
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Ensure that we indicate authorization may vary
@@ -152,14 +153,13 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		token := headerParts[1]
 
-		admin, err := os.ReadFile("/etc/assist-admin/gitea-admin")
-		// admin, err := os.ReadFile("/tmp/assist-admin")
+		admin, err := os.ReadFile("/etc/assist-secret/assist-token")
 		if err != nil {
 			log.Printf("Error reading file: %v", err)
 			http.Error(w, "Internal Error", http.StatusInternalServerError)
 			return
 		}
-		// Trim the whitespace from
+		// Trim the whitespace from file
 		if strings.TrimSpace(string(admin)) != strings.TrimSpace(token) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			message := "invalid or missing auth token"

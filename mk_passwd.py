@@ -9,6 +9,7 @@ import argparse
 parser = argparse.ArgumentParser(description="Create a Kubernetes secret with a random or predefined password and username.")
 parser.add_argument('--password', type=str, help='Predefined password to use. If not provided, a random password will be generated.')
 parser.add_argument('--username', type=str, default='gitea_admin', help='Username to use. Defaults to "gitea_admin".')
+parser.add_argument('--token', type=str, help='Gitea-Assist token for Authentication Bearer [token] exchange with the API itself.')
 
 args = parser.parse_args()
 
@@ -16,6 +17,7 @@ args = parser.parse_args()
 alphabet = string.ascii_letters + string.digits 
 password = args.password if args.password else ''.join(secrets.choice(alphabet) for i in range(12))
 username = args.username
+token    = args.token if args.token else ''.join(secrets.choice(alphabet) for i in range(15))
 
 # Name of the secret
 secret_name = "gitea-assist-creds"
@@ -33,7 +35,8 @@ if get_secret_process.returncode != 0:
         "generic", 
         secret_name, 
         "--from-literal=gitea-password={}".format(password),
-        "--from-literal=gitea-username={}".format(username)
+        "--from-literal=gitea-username={}".format(username),
+        "--from-literal=assist-token={}".format(token)
     ]
     subprocess.run(create_secret_command, check=True)
 else:
