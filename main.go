@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	errorapi "gitea_assist/error"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -984,16 +984,14 @@ func processPushEvent(pushEvent *api.PushPayload, access *GiteaAccess) {
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Error reading body: %v", err)
-		http.Error(w, "can't read body", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.ErrRequestReadError)
 		return
 	}
 
 	pushEvent, err := api.ParsePushHook(body)
 
 	if err != nil {
-		log.Printf("Error parsing body: %v", err)
-		http.Error(w, "can't read body", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.ErrRequestReadError)
 		return
 	}
 
@@ -1039,8 +1037,9 @@ func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, 
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		log.Println("Failed to create user:", string(body))
-		return false, nil
+		err := fmt.Errorf("User create response status code not correct: %s", string(body))
+		log.Println(err.Error())
+		return false, err
 	}
 	return true, nil
 }
@@ -1050,19 +1049,19 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if err != nil {
-		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		errorapi.HandleError(w, errorapi.ErrRequestReadError)
 		return
 	}
 
 	var options CreateUserOptions
 	err = json.Unmarshal(body, &options)
 	if err != nil {
-		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.ErrRequestParseError)
 		return
 	}
 
 	if options.Username == "" || options.Password == "" || options.Email == "" {
-		http.Error(w, "Username password, and email must be provided", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Username, password, and email must be provided,"))
 		return
 	}
 
@@ -1072,12 +1071,11 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("User created successfully"))
 	} else {
-		http.Error(w, "User creation failed", http.StatusBadRequest)
+		errormsg := "User creation failed "
 		if err != nil {
-			log.Printf("User creation failed %v", err)
-		} else {
-			log.Printf("User creation failed")
+			errormsg += err.Error()
 		}
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, errormsg))
 	}
 }
 
@@ -1095,8 +1093,9 @@ func deleteUser(giteaBaseURL, adminUsername, adminPassword, username string, pur
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		log.Println("Failed to delete user:", string(body))
-		return false, nil
+		err := fmt.Errorf("Failed to delete user: %s", string(body))
+		log.Println(err.Error())
+		return false, err
 	}
 	return true, nil
 }
@@ -1106,19 +1105,19 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if err != nil {
-		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		errorapi.HandleError(w, errorapi.ErrRequestParseError)
 		return
 	}
 
 	var options DeleteUserOptions
 	err = json.Unmarshal(body, &options)
 	if err != nil {
-		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.ErrRequestParseError)
 		return
 	}
 
 	if options.Username == "" {
-		http.Error(w, "Username must be provided", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Username must be provided"))
 		return
 	}
 
@@ -1128,12 +1127,11 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("User deleted successfully"))
 	} else {
-		http.Error(w, "User deletion failed", http.StatusBadRequest)
+		errormsg := "User deletion failed"
 		if err != nil {
-			log.Printf("User deletion failed %v", err)
-		} else {
-			log.Printf("User deletion failed")
+			errormsg += err.Error()
 		}
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, errormsg))
 	}
 }
 
@@ -1157,14 +1155,9 @@ func getUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]byt
 		return nil, fmt.Errorf("gitea returned status: %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("error reading gitea response: %v", err)
-	}
-
-	if err != nil {
-		log.Printf("Error reading Gitea response %v", err)
-		return nil, err
 	}
 
 	return bodyBytes, nil
@@ -1174,7 +1167,7 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 	// Retrieve the username from the query parameters
 	username := r.URL.Query().Get("username")
 	if username == "" {
-		http.Error(w, "Username not provided", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Username not provided"))
 		return
 	}
 
@@ -1182,6 +1175,7 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write(resp)
 	} else {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrInternalServerError, err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
@@ -1195,7 +1189,7 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		handleDeleteUser(w, r)
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrMethodNotAllowed, r.Method))
 	}
 }
 
@@ -1288,6 +1282,7 @@ func handleDeleteUserSSHKey(w http.ResponseWriter, r *http.Request) {
 	keyName := r.URL.Query().Get("key_name")
 	username := r.URL.Query().Get("username")
 	if keyName == "" || username == "" {
+
 		http.Error(w, "Key name and username must be provided to delete the SSH key", http.StatusBadRequest)
 		return
 	}
@@ -1457,7 +1452,8 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Webhook creation failed %v", err)
 		}
 	} else {
-		http.Error(w, "Repo creation failed", http.StatusBadRequest)
+		e := fmt.Sprintf("Repo creation failed: %v", err)
+		http.Error(w, e, http.StatusBadRequest)
 		log.Printf("Repo creation failed %v", err)
 	}
 }
@@ -1478,15 +1474,17 @@ func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName 
 	// Send the request
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
-		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		errorString := fmt.Sprintf("Error querying Gitea, returned error: %v", err)
+		log.Printf(errorString)
+		return nil, fmt.Errorf(errorString)
 	}
 	defer resp.Body.Close()
 
 	// Check if the request was successful
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Error fetching repo from Gitea %v", resp.StatusCode)
-		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		errorString := fmt.Sprintf("Error fetching repo from Gitea, error code: %v", resp.StatusCode)
+		log.Printf(errorString)
+		return nil, fmt.Errorf(errorString)
 	}
 
 	// Read the response body from Gitea into a byte slice
@@ -1618,7 +1616,10 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write(resp)
 	} else {
-		w.WriteHeader(http.StatusInternalServerError)
+		s := fmt.Sprintf("Could not find Repo For User: %v", err)
+		log.Printf("Error found: %v", err)
+		http.Error(w, s, http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
 	}
 }
 
@@ -2337,7 +2338,7 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	//mux := http.NewServeMux()
 	r := mux.NewRouter()
-	r.HandleFunc("/onPush", webhookHandler)
+	r.HandleFunc("/onPush", webhookHandler) // HS done notes: What should be done for protocolPushEvent function?
 	r.HandleFunc("/users", handleUser)
 	r.HandleFunc("/users/ssh", handleUserSsh)
 	r.HandleFunc("/repos", handleRepo)
