@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -1142,7 +1141,7 @@ func getUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]byt
 		return nil, fmt.Errorf("gitea returned status: %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("error reading gitea response: %v", err)
 	}
@@ -1811,7 +1810,7 @@ func getOrg(giteaBaseURL, adminUsername, adminPassword, orgName string) (*api.Or
 func handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("org_name")
 	if name == "" {
-		http.Error(w, "Orgname be provided", http.StatusBadRequest)
+		http.Error(w, "Org name must be provided", http.StatusBadRequest)
 		return
 	}
 
@@ -2002,14 +2001,15 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 // listens on port 8900. Logging is utilized to indicate the server's start
 // and to capture any fatal errors.
 func main() {
-	//mux := http.NewServeMux()
 	r := mux.NewRouter()
 	r.HandleFunc("/onPush", webhookHandler)
 	r.HandleFunc("/users", handleUser)
+
 	r.HandleFunc("/repos", handleRepo)
 	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
 	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
 	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+
 	r.HandleFunc("/forks", handleFork)
 	r.HandleFunc("/orgs", handleOrg)
 	r.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
