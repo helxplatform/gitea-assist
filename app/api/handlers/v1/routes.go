@@ -9,7 +9,7 @@ import (
 func (m *Mux) Routes() http.Handler {
 	router := mux.NewRouter()
 	router.HandleFunc("/users", handleUser)
-	router.HandleFunc("/onPush", webhookHandler)
+	// router.HandleFunc("/onPush", webhookHandler)
 
 	router.HandleFunc("/repos", handleRepo)
 	router.HandleFunc("/repos/collaborators", handleRepoCollaborator)
