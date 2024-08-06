@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"gitea_assist/app/internal/core"
+	"gitea_assist/internal/core"
 	"log"
 )
 

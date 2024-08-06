@@ -14,7 +14,6 @@ type GiteaAccess struct {
 }
 
 func NewAccess() (*GiteaAccess, error) {
-	var access *GiteaAccess
 
 	username, err := os.ReadFile("/etc/assist-secret/gitea-username")
 	if err != nil {
@@ -34,7 +33,7 @@ func NewAccess() (*GiteaAccess, error) {
 		return nil, err
 	}
 
-	access = &GiteaAccess{
+	access := &GiteaAccess{
 		URL:      string(url),
 		Username: string(username),
 		Password: string(password),
