@@ -1686,52 +1686,77 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getRepoFileSHA(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) (string, error) {
+func getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) ([]api.ContentsResponse, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", giteaBaseURL, owner, repoName, path, ref)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading Gitea response %v", err)
-		return "", err
-	}
-	var contentsResponse api.ContentsResponse
-	err = json.Unmarshal(bodyBytes, &contentsResponse)
-	if err != nil {
-		log.Printf("Error reading Gitea response %v", err)
-		return "", err
+		return nil, err
 	}
 
-	return contentsResponse.SHA, nil
+	var contentsResponse []api.ContentsResponse
+	err = json.Unmarshal(bodyBytes, &contentsResponse)
+	if err != nil {
+		var single api.ContentsResponse
+		err = json.Unmarshal(bodyBytes, &single)
+		if err == nil {
+			contentsResponse = []api.ContentsResponse{single}
+		} else {
+			log.Printf("Error reading Gitea response %v", err)
+			return nil, err
+		}
+	}
+
+	return contentsResponse, nil
 }
 
 func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, branch, message string, files []*api.ChangeFileOperation) (string, error) {
 	// Build the Gitea API URL for downloading the repo archive
 	url := fmt.Sprintf("%s/repos/%s/%s/contents", giteaBaseURL, owner, repoName)
 
+	var actualFiles []*api.ChangeFileOperation
+
 	for _, file := range files {
 		if file.Operation != "create" {
-			sha, err := getRepoFileSHA(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
+			// Multiple files may be returned in the case of deleting a directory path
+			repoFiles, err := getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
 			if err != nil {
 				log.Printf("Error getting SHA of '%v' from Gitea %v", file.Path, err)
 				return "", err
 			}
-			file.SHA = sha
+			if len(repoFiles) > 1 {
+				if file.Operation != "delete" {
+					log.Printf("Multiple files returned for path %s, cannot create/update a directory directly", file.Path)
+					return "", fmt.Errorf("Cannot create/update directory %s directly", file.Path)
+				}
+				for _, repoFile := range repoFiles {
+					actualFiles = append(actualFiles, &api.ChangeFileOperation{
+						Operation: file.Operation,
+						Path:      repoFile.Path,
+						SHA:       repoFile.SHA,
+					})
+				}
+			} else {
+				file.SHA = repoFiles[0].SHA
+				actualFiles = append(actualFiles, file)
+			}
 		}
 	}
 
@@ -1742,7 +1767,7 @@ func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, r
 			Committer:  api.Identity{Name: adminUsername},
 			Message:    message,
 		},
-		Files: files,
+		Files: actualFiles,
 	}
 
 	jsonData, _ := json.Marshal(data)
