@@ -1734,7 +1734,9 @@ func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, r
 	var actualFiles []*api.ChangeFileOperation
 
 	for _, file := range files {
-		if file.Operation != "create" {
+		if file.Operation == "create" {
+			actualFiles = append(actualFiles, file)
+		} else {
 			// Multiple files may be returned in the case of deleting a directory path
 			repoFiles, err := getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
 			if err != nil {
@@ -1743,8 +1745,8 @@ func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, r
 			}
 			if len(repoFiles) > 1 {
 				if file.Operation != "delete" {
-					log.Printf("Multiple files returned for path %s, cannot create/update a directory directly", file.Path)
-					return "", fmt.Errorf("Cannot create/update directory %s directly", file.Path)
+					log.Printf("Multiple files returned for path %s, cannot update a directory directly", file.Path)
+					return "", fmt.Errorf("Cannot update directory %s directly", file.Path)
 				}
 				for _, repoFile := range repoFiles {
 					actualFiles = append(actualFiles, &api.ChangeFileOperation{
@@ -1770,7 +1772,8 @@ func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, r
 		Files: actualFiles,
 	}
 
-	jsonData, _ := json.Marshal(data)
+	jsonData, _ := json.MarshalIndent(data, "", "	")
+	log.Printf("%s", jsonData)
 
 	// Build request
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
