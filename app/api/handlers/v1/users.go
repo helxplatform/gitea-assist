@@ -11,15 +11,6 @@ import (
 	api "code.gitea.io/gitea/modules/structs"
 )
 
-// In core gitea-access
-var access *GiteaAccess
-
-type GiteaAccess struct {
-	URL      string
-	Username string
-	Password string
-}
-
 type CreateUserOptions struct {
 	Email    string `json:"email"`
 	Username string `json:"username"`
@@ -31,20 +22,11 @@ type DeleteUserOptions struct {
 	Purge    bool   `json:"purge"`
 }
 
-func handleUser(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		handleCreateUser(w, r)
-	case http.MethodGet:
-		handleGetUser(w, r)
-	case http.MethodDelete:
-		handleDeleteUser(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+func (m *Mux) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	if err != nil {
+		log.Printf("Failed ")
+		return
 	}
-}
-
-func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
@@ -67,9 +49,9 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Received User Data:", options)
 	if success, err := createUser(
-		access.URL,
-		access.Username,
-		access.Password,
+		m.access.URL,
+		m.access.Username,
+		m.access.Password,
 		options.Username,
 		options.Password,
 		options.Email); success {
@@ -86,7 +68,7 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleGetUser(w http.ResponseWriter, r *http.Request) {
+func (m *Mux) handleGetUser(w http.ResponseWriter, r *http.Request) {
 	// Retrieve the username from the query parameters
 	username := r.URL.Query().Get("username")
 	if username == "" {
@@ -179,7 +161,7 @@ func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, 
 	return true, nil
 }
 
-func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+func (m *Mux) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
@@ -213,4 +195,24 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			log.Printf("User deletion failed")
 		}
 	}
+}
+
+func deleteUser(giteaBaseURL, adminUsername, adminPassword, username string, purge bool) (bool, error) {
+	url := fmt.Sprintf("%s/admin/users/%s?purge=%t", giteaBaseURL, username, purge)
+	req, _ := http.NewRequest("DELETE", url, nil)
+
+	req.Header.Add("Content-Type", "application/json")
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		log.Println("Failed to delete user:", string(body))
+		return false, nil
+	}
+	return true, nil
 }
