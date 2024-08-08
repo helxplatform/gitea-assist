@@ -1001,7 +1001,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("OK")
 }
 
-func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, email string) (bool, error) {
+func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, email string) (bool, *errorapi.APIError) {
 	/*
 			user := giteaAPI.CreateUserOption{
 				Username: username,
@@ -1031,13 +1031,14 @@ func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, 
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		apierr := errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
+		return false, apierr
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("User create response status code not correct: %s", string(body))
+		err := errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("create user returned unexpected status: %s", string(body)))
 		log.Println(err.Error())
 		return false, err
 	}
@@ -1071,15 +1072,15 @@ func handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("User created successfully"))
 	} else {
-		errormsg := "User creation failed "
-		if err != nil {
-			errormsg += err.Error()
+		if err == nil {
+			err = errorapi.WrapError(errorapi.ErrInternalServerError, "User creation failed ")
+		} else {
+			errorapi.HandleError(w, err)
 		}
-		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, errormsg))
 	}
 }
 
-func deleteUser(giteaBaseURL, adminUsername, adminPassword, username string, purge bool) (bool, error) {
+func deleteUser(giteaBaseURL, adminUsername, adminPassword, username string, purge bool) (bool, *errorapi.APIError) {
 	url := fmt.Sprintf("%s/admin/users/%s?purge=%t", giteaBaseURL, username, purge)
 	req, _ := http.NewRequest("DELETE", url, nil)
 
@@ -1087,13 +1088,14 @@ func deleteUser(giteaBaseURL, adminUsername, adminPassword, username string, pur
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		errapi := errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
+		return false, errapi
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("Failed to delete user: %s", string(body))
+		body, _ := io.ReadAll(resp.Body) //HS: What happens if this fails?
+		err := errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Failed to delete user: %s", string(body)))
 		log.Println(err.Error())
 		return false, err
 	}
@@ -1127,37 +1129,41 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("User deleted successfully"))
 	} else {
-		errormsg := "User deletion failed"
-		if err != nil {
-			errormsg += err.Error()
+		if err == nil {
+			err = errorapi.WrapError(errorapi.ErrInternalServerError, "User deletion failed")
 		}
-		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, errormsg))
+		errorapi.HandleError(w, err)
 	}
 }
 
-func getUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]byte, error) {
+func getUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]byte, *errorapi.APIError) {
 	url := fmt.Sprintf("%s/users/%s", giteaBaseURL, username)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("error creating request: %v", err))
 	}
 
 	// Set Basic Authentication header
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error querying gitea: %v", err)
+		return nil, errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gitea returned status: %d", resp.StatusCode)
+		var errapi *errorapi.APIError
+		if resp.StatusCode == 404 {
+			errapi = errorapi.WrapError(errorapi.ErrNotFound, fmt.Sprintf("did not find the user: %s", username))
+		} else {
+			errapi = errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("error getting user, gitea returned status: %d", resp.StatusCode))
+		}
+		return nil, errapi
 	}
-
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading gitea response: %v", err)
+		return nil, errorapi.WrapError(errorapi.ErrResponseReadError, err.Error())
 	}
 
 	return bodyBytes, nil
@@ -1175,7 +1181,7 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write(resp)
 	} else {
-		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrInternalServerError, err.Error()))
+		errorapi.HandleError(w, err)
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
@@ -1193,31 +1199,30 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]api.PublicKey, error) {
+func getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]api.PublicKey, *errorapi.APIError) {
 	req, err := http.NewRequest("GET", giteaBaseURL+"/users/"+username+"/keys/", nil)
 	if err != nil {
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("error creating request: %v", err))
 	}
 
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading Gitea response %v", err)
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrResponseReadError, err.Error())
 	}
 
 	var publicKeys []api.PublicKey
 	err = json.Unmarshal(bodyBytes, &publicKeys)
 	if err != nil {
-		log.Printf("Error reading Gitea response %v", err)
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrResponseReadError, fmt.Sprintf("Gitea response read error while getting user ssh keys: %v", err))
 	}
 
 	return publicKeys, nil
@@ -1226,7 +1231,7 @@ func getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username stri
 func handleGetUserSSHKeys(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
 	if username == "" {
-		http.Error(w, "Username must be provided to list SSH keys", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Username must be provided to list SSH keys"))
 		return
 	}
 
@@ -1235,15 +1240,15 @@ func handleGetUserSSHKeys(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(jsonData))
 	} else {
-		http.Error(w, "Failed to list keys", http.StatusBadRequest)
-		log.Printf("Failed to list keys %v", err)
+		errormsg := fmt.Sprintf("Failed to get user ssh keys with error: %v.", err)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, errormsg))
 	}
 }
 
-func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name string) error {
-	keys, err := getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username)
-	if err != nil {
-		return err
+func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name string) *errorapi.APIError {
+	keys, reterr := getSSHKeysForUser(giteaBaseURL, adminUsername, adminPassword, username)
+	if reterr != nil {
+		return errorapi.WrapError(reterr, "Failed to get User SSH Keys")
 	}
 
 	var id int64 = -1
@@ -1254,25 +1259,25 @@ func deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, n
 		}
 	}
 	if id == -1 {
-		return nil
+		return nil // No key found
 	}
 
 	url := fmt.Sprintf("%s/admin/users/%s/keys/%d", giteaBaseURL, username, id)
 	req, err := http.NewRequest("DELETE", url, nil)
 	if err != nil {
-		return err
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Error deleting ssh keys: %v", err))
 	}
 
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Error sending delete request %v", err.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != 404 {
-		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Delete Keys request returned status: %d", resp.StatusCode))
 	}
 
 	return nil
@@ -1282,8 +1287,7 @@ func handleDeleteUserSSHKey(w http.ResponseWriter, r *http.Request) {
 	keyName := r.URL.Query().Get("key_name")
 	username := r.URL.Query().Get("username")
 	if keyName == "" || username == "" {
-
-		http.Error(w, "Key name and username must be provided to delete the SSH key", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Key name and Username must be provided to delete SSH keys"))
 		return
 	}
 
@@ -1291,15 +1295,14 @@ func handleDeleteUserSSHKey(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Successfully deleted SSH key"))
 	} else {
-		http.Error(w, "Key deletion failed", http.StatusBadRequest)
-		log.Printf("Key deletion failed %v", err)
+		errorapi.HandleError(w, errorapi.WrapError(err, "Error Deleting SSH Key Pair"))
 	}
 }
 
-func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, key, name string) error {
-	err := deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name)
-	if err != nil {
-		return err
+func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, key, name string) *errorapi.APIError {
+	reterr := deleteSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, name)
+	if reterr != nil {
+		return errorapi.WrapError(reterr, "Failed to delete existing User SSH Keys")
 	}
 
 	data := api.CreateKeyOption{
@@ -1312,32 +1315,30 @@ func createSSHKeyForUser(giteaBaseURL, adminUsername, adminPassword, username, k
 
 	req, err := http.NewRequest("POST", giteaBaseURL+"/admin/users/"+username+"/keys", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return err
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("error creating request: %v", err))
 	}
 
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("error creating ssh keys, returned error code: %d", resp.StatusCode))
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error reading Gitea response %v", err)
-		return err
+		return errorapi.WrapError(errorapi.ErrResponseReadError, err.Error())
 	}
 
 	var publicKeyResponse api.PublicKey
 	err = json.Unmarshal(bodyBytes, &publicKeyResponse)
 	if err != nil {
-		log.Printf("Error reading Gitea response %v", err)
-		return err
+		return errorapi.WrapError(errorapi.ErrResponseReadError, fmt.Sprintf("Gitea response read error after creating user ssh keys: %v", err))
 	}
 
 	fmt.Println(publicKeyResponse.ID, publicKeyResponse.Key)
@@ -1350,19 +1351,19 @@ func handleCreateUserSSHKey(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if err != nil {
-		http.Error(w, "Failed reading request body", http.StatusInternalServerError)
+		errorapi.HandleError(w, errorapi.ErrRequestReadError)
 		return
 	}
 
 	var options CreateSSHOptions
 	err = json.Unmarshal(body, &options)
 	if err != nil {
-		http.Error(w, "Failed parsing request body", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.ErrRequestParseError)
 		return
 	}
 
 	if options.Key == "" || options.KeyName == "" || options.Username == "" {
-		http.Error(w, "Key, KeyName, and Username must be provided to create the SSH key", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Key, KeyName, and Username must be provided to create the SSH key"))
 		return
 	}
 
@@ -1370,8 +1371,7 @@ func handleCreateUserSSHKey(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("Successfully created SSH key"))
 	} else {
-		http.Error(w, "Key creation failed", http.StatusBadRequest)
-		log.Printf("Key creation failed %v", err)
+		errorapi.HandleError(w, errorapi.WrapError(err, "SSH Key creation failed"))
 	}
 }
 
@@ -1384,7 +1384,7 @@ func handleUserSsh(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		handleDeleteUserSSHKey(w, r)
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrMethodNotAllowed, r.Method))
 	}
 }
 
@@ -2338,9 +2338,9 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	//mux := http.NewServeMux()
 	r := mux.NewRouter()
-	r.HandleFunc("/onPush", webhookHandler) // HS done notes: What should be done for protocolPushEvent function?
-	r.HandleFunc("/users", handleUser)
-	r.HandleFunc("/users/ssh", handleUserSsh)
+	r.HandleFunc("/onPush", webhookHandler)   // HS done notes: What should be done for protocolPushEvent function?
+	r.HandleFunc("/users", handleUser)        //HS done
+	r.HandleFunc("/users/ssh", handleUserSsh) // HS done
 	r.HandleFunc("/repos", handleRepo)
 	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
 	r.HandleFunc("/repos/hooks", handleRepoHook)

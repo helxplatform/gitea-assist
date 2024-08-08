@@ -3,6 +3,7 @@ package errorapi
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -24,15 +25,17 @@ func (e APIError) Compare(err APIError) bool {
 
 var (
 	// A list of general error of type APIError
-	ErrBadRequest          = APIError{error: errors.New("bad request"), status: http.StatusBadRequest}
-	ErrNotFound            = APIError{error: errors.New("not found"), status: http.StatusNotFound}
-	ErrInternalServerError = APIError{error: errors.New("internal server error"), status: http.StatusInternalServerError}
-	ErrRequestReadError    = APIError{error: errors.New("error reading request body"), status: http.StatusBadRequest}
-	ErrRequestParseError   = APIError{error: errors.New("request parse error"), status: http.StatusBadRequest}
-	ErrMethodNotAllowed    = APIError{error: errors.New("method not allowed"), status: http.StatusMethodNotAllowed}
-
+	ErrBadRequest          = &APIError{error: errors.New("bad request"), status: http.StatusBadRequest}
+	ErrNotFound            = &APIError{error: errors.New("not found"), status: http.StatusNotFound}
+	ErrInternalServerError = &APIError{error: errors.New("internal server error"), status: http.StatusInternalServerError}
+	ErrRequestReadError    = &APIError{error: errors.New("error reading request body"), status: http.StatusBadRequest}
+	ErrResponseReadError   = &APIError{error: errors.New("error reading response body"), status: http.StatusBadRequest}
+	ErrRequestParseError   = &APIError{error: errors.New("request parse error"), status: http.StatusBadRequest}
+	ErrMethodNotAllowed    = &APIError{error: errors.New("method not allowed"), status: http.StatusMethodNotAllowed}
+	ErrGiteaConnectError   = &APIError{error: errors.New("error connecting to gitea"), status: http.StatusBadRequest}
+	ErrUnauthorized        = &APIError{error: errors.New("unauthorized attempt to login"), status: http.StatusUnauthorized}
 	// Making a slice for all predefined errors for ease of comparison in HandleError below
-	allErrors = []APIError{ErrBadRequest, ErrNotFound, ErrInternalServerError, ErrRequestReadError, ErrMethodNotAllowed, ErrRequestParseError}
+	allErrors = []APIError{*ErrBadRequest, *ErrNotFound, *ErrInternalServerError, *ErrRequestReadError, *ErrMethodNotAllowed, *ErrRequestParseError}
 )
 
 // This function provides capability to "modify" the message of an existing error
@@ -40,15 +43,16 @@ var (
 // For example:
 // repoError := WrapError(ErrNotFound, "Repo") :: Creates a new error specific to repo
 // But now, repoError.Compare(ErrNotFound) will return true because of the Join method of errors package
-func WrapError(e APIError, msg string) APIError {
+func WrapError(e *APIError, msg string) *APIError {
 	err := errors.Join(fmt.Errorf("%v", msg), e.error)
-	return APIError{error: err, status: e.status}
+	return &APIError{error: err, status: e.status}
 }
 
-func HandleError(w http.ResponseWriter, err APIError) {
+func HandleError(w http.ResponseWriter, err *APIError) {
 	for _, sperr := range allErrors {
 		if err.Compare(sperr) {
 			http.Error(w, err.Error(), err.status)
+			log.Println("ERROR:: %s STATUS:: %d", err.Error(), err.status)
 			return
 		}
 	}
