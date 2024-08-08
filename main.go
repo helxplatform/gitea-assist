@@ -3,16 +3,18 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	api "code.gitea.io/gitea/modules/structs"
@@ -124,16 +126,68 @@ type AtomicCounter struct {
 var access *GiteaAccess
 var forkCounter *AtomicCounter
 var fullname string
+var assistToken string
 
 func init() {
 	access, _ = getAccess()
 	fullname, _ = getFullname()
 	forkCounter = &AtomicCounter{}
+	assistToken = assistAdminToken()
 }
 
 // Next returns the next number in sequence
 func (ac *AtomicCounter) Next() int64 {
 	return atomic.AddInt64(&ac.val, 1)
+}
+
+// Bare minimum auth middleware in lieu of major restructuring.
+// Assumes we are reading a K8S secret mounted with the other secrets
+// read in by the init() func at /etc/assist-secret/assist-token
+// This can be prepopulated by the mk_password.py file.
+func AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ensure that we indicate authorization may vary
+		w.Header().Add("Vary", "Authorization")
+
+		// Returns "" empty string if nothing is found.
+		authorizationHeader := r.Header.Get("Authorization")
+
+		// If no auth header, set user as anonymous
+		if authorizationHeader == "" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			message := "invalid or missing auth token"
+			http.Error(w, message, http.StatusUnauthorized)
+			return
+		}
+
+		headerParts := strings.Split(authorizationHeader, " ")
+		if len(headerParts) != 2 || headerParts[0] != "Bearer" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			message := "invalid or missing auth token"
+			http.Error(w, message, http.StatusUnauthorized)
+			return
+		}
+
+		token := headerParts[1]
+
+		// Trim the whitespace from file
+		if assistToken != strings.TrimSpace(token) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			message := "invalid or missing auth token"
+			http.Error(w, message, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func assistAdminToken() string {
+	admin, err := os.ReadFile("/etc/assist-secret/assist-token")
+	if err != nil {
+		log.Fatalf("init()-Error reading assist-token file: %v", err)
+	}
+	assistToken := strings.TrimSpace(string(admin))
+	return assistToken
 }
 
 func getAccess() (*GiteaAccess, error) {
@@ -1157,7 +1211,7 @@ func getUser(giteaBaseURL, adminUsername, adminPassword, username string) ([]byt
 		return nil, fmt.Errorf("gitea returned status: %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("error reading gitea response: %v", err)
 	}
@@ -2499,26 +2553,47 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 
 // main initializes an HTTP server with endpoints for processing push events,
 // checking service readiness, and determining service liveness. The server
-// listens on port 8900. Logging is utilized to indicate the server's start
+// listens on port 9000. Logging is utilized to indicate the server's start
 // and to capture any fatal errors.
 func main() {
-	//mux := http.NewServeMux()
-	r := mux.NewRouter()
-	r.HandleFunc("/onPush", webhookHandler)
-	r.HandleFunc("/users", handleUser)
-	r.HandleFunc("/users/ssh", handleUserSsh)
-	r.HandleFunc("/repos", handleRepo)
-	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
-	r.HandleFunc("/repos/hooks", handleRepoHook)
-	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
-	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
-	r.HandleFunc("/forks", handleFork)
-	r.HandleFunc("/orgs", handleOrg)
-	r.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
-	r.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
-	r.HandleFunc("/readiness", readinessHandler)
-	r.HandleFunc("/liveness", livenessHandler)
-	http.Handle("/", r)
+	router := mux.NewRouter()
+	// r.HandleFunc("/onPush", webhookHandler)
+	router.Use(AuthMiddleware)
+
+	router.HandleFunc("/repos", handleRepo)
+	router.HandleFunc("/repos", handleRepo)
+	router.HandleFunc("/repos", handleRepo)
+	router.HandleFunc("/users", handleUser)
+	router.HandleFunc("/repos/collaborators", handleRepoCollaborator)
+	router.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
+	router.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+	router.HandleFunc("/forks", handleFork)
+	router.HandleFunc("/orgs", handleOrg)
+	router.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
+	router.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
+	router.HandleFunc("/readiness", readinessHandler)
+	router.HandleFunc("/liveness", livenessHandler)
+
+	srv := &http.Server{
+		Handler:      router,
+		Addr:         "127.0.0.1:9000",
+		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  15 * time.Second,
+	}
+
 	log.Println("Server started on :9000")
-	log.Fatal(http.ListenAndServe(":9000", nil))
+	go func() {
+		err := srv.ListenAndServe()
+		log.Fatalf(err.Error())
+	}()
+
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	<-shutdown
+
+	//Shutdown gracefully
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	defer cancel()
+	log.Print("Received shutdown signal closing server ...")
+	srv.Shutdown(ctx)
 }
