@@ -52,7 +52,7 @@ func HandleError(w http.ResponseWriter, err *APIError) {
 	for _, sperr := range allErrors {
 		if err.Compare(sperr) {
 			http.Error(w, err.Error(), err.status)
-			log.Println("ERROR:: %s STATUS:: %d", err.Error(), err.status)
+			log.Printf("ERROR:: %s STATUS:: %d\n", err.Error(), err.status)
 			return
 		}
 	}
