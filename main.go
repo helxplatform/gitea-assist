@@ -126,11 +126,13 @@ type AtomicCounter struct {
 var access *GiteaAccess
 var forkCounter *AtomicCounter
 var fullname string
+var assistToken string
 
 func init() {
 	access, _ = getAccess()
 	fullname, _ = getFullname()
 	forkCounter = &AtomicCounter{}
+	assistToken = assistAdminToken()
 }
 
 // Next returns the next number in sequence
@@ -168,14 +170,8 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		token := headerParts[1]
 
-		admin, err := os.ReadFile("/etc/assist-secret/assist-token")
-		if err != nil {
-			log.Printf("Error reading file: %v", err)
-			http.Error(w, "Internal Error", http.StatusInternalServerError)
-			return
-		}
 		// Trim the whitespace from file
-		if strings.TrimSpace(string(admin)) != strings.TrimSpace(token) {
+		if assistToken != strings.TrimSpace(token) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			message := "invalid or missing auth token"
 			http.Error(w, message, http.StatusUnauthorized)
@@ -183,6 +179,15 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func assistAdminToken() string {
+	admin, err := os.ReadFile("/etc/assist-secret/assist-token")
+	if err != nil {
+		log.Fatalf("init()-Error reading assist-token file: %v", err)
+	}
+	assistToken := strings.TrimSpace(string(admin))
+	return assistToken
 }
 
 func getAccess() (*GiteaAccess, error) {
