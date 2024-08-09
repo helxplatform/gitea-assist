@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	errorapi "gitea_assist/error"
@@ -10,9 +11,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	api "code.gitea.io/gitea/modules/structs"
@@ -124,16 +127,68 @@ type AtomicCounter struct {
 var access *GiteaAccess
 var forkCounter *AtomicCounter
 var fullname string
+var assistToken string
 
 func init() {
 	access, _ = getAccess()
 	fullname, _ = getFullname()
 	forkCounter = &AtomicCounter{}
+	assistToken = assistAdminToken()
 }
 
 // Next returns the next number in sequence
 func (ac *AtomicCounter) Next() int64 {
 	return atomic.AddInt64(&ac.val, 1)
+}
+
+// Bare minimum auth middleware in lieu of major restructuring.
+// Assumes we are reading a K8S secret mounted with the other secrets
+// read in by the init() func at /etc/assist-secret/assist-token
+// This can be prepopulated by the mk_password.py file.
+func AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ensure that we indicate authorization may vary
+		w.Header().Add("Vary", "Authorization")
+
+		// Returns "" empty string if nothing is found.
+		authorizationHeader := r.Header.Get("Authorization")
+
+		// If no auth header, set user as anonymous
+		if authorizationHeader == "" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			message := "invalid or missing auth token"
+			errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrUnauthorized, message))
+			return
+		}
+
+		headerParts := strings.Split(authorizationHeader, " ")
+		if len(headerParts) != 2 || headerParts[0] != "Bearer" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			message := "invalid or missing auth token"
+			errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrUnauthorized, message))
+			return
+		}
+
+		token := headerParts[1]
+
+		// Trim the whitespace from file
+		if assistToken != strings.TrimSpace(token) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			message := "invalid or missing auth token"
+			errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrUnauthorized, message))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func assistAdminToken() string {
+	admin, err := os.ReadFile("/etc/assist-secret/assist-token")
+	if err != nil {
+		log.Fatalf("init()-Error reading assist-token file: %v", err)
+	}
+	assistToken := strings.TrimSpace(string(admin))
+	return assistToken
 }
 
 func getAccess() (*GiteaAccess, error) {
@@ -889,111 +944,6 @@ func processMerge(mc *MergeContext, filePatches []diff.FilePatch) error {
 	return applyChanges(mc, filteredPatches)
 }
 
-// processPushEvent handles a push event from a Git repository. Given the event's
-// payload and authentication credentials, the function performs several tasks:
-//   - Identifies the repository associated with the push.
-//   - Clears any previous repository data from a temporary directory.
-//   - Locates all forks of the repository and processes each one by:
-//     a. Cloning the upstream and fork repositories.
-//     b. Creating a merge context for the two repositories.
-//     c. Computing and applying diffs between the repositories.
-//     d. Pushing merged changes to the fork.
-//
-// Error situations, such as cloning failures or merge issues, are logged.
-func processPushEvent(pushEvent *api.PushPayload, access *GiteaAccess) {
-	var forkIsEmpty bool = false
-
-	// 1. Get the repository related to the push event
-	languagesURL := pushEvent.Repo.LanguagesURL
-	repoURL := strings.ReplaceAll(languagesURL, "/languages", "")
-	log.Printf("processing push event on repo with URL %s", repoURL)
-
-	err := os.RemoveAll("/tmp/repos")
-	if err != nil {
-		log.Printf("failed to clean work directory")
-		return
-	}
-
-	if forks, err := findForks(repoURL, access.Username, access.Password); err == nil {
-		var pushRepo *git.Repository
-
-		for _, fork := range forks {
-			log.Printf("found fork %s", fork.Owner.UserName+"/"+fork.Name)
-			if pushRepo == nil {
-				pushRepo, err = cloneRepoIntoDir("/tmp/repos/", "upstream/"+pushEvent.Repo.Name, pushEvent.Repo.CloneURL, false)
-				if err != nil {
-					log.Printf("Failed to clone the upstream repository: %v", err)
-					return
-				}
-			}
-			forkRepo, err := cloneRepoIntoDir("/tmp/repos/", fork.Owner.UserName+"/"+fork.Name, fork.CloneURL, true)
-			if err != nil {
-				log.Printf("Failed to clone the fork repository: %v", err)
-				continue
-			}
-
-			// This happens when the fork is empty, so have to initilize it locally
-			if forkRepo == nil {
-				if forkRepo, err = InitRepoWithRemote("/tmp/repos/"+fork.Owner.UserName+"/"+fork.Name, fork.CloneURL, pushEvent.Branch()); err != nil {
-					log.Printf("Failed to initialize blank fork repository: %v", err)
-					continue
-				}
-				forkIsEmpty = true
-			}
-
-			mc := &MergeContext{
-				Upstream:         pushRepo,
-				UpstreamCloneURL: pushEvent.Repo.CloneURL,
-				UpstreamName:     "upstream/" + pushEvent.Repo.Name,
-				UpstreamBranch:   pushEvent.Branch(),
-				Fork:             forkRepo,
-				ForkCloneURL:     fork.CloneURL,
-				ForkName:         fork.Owner.UserName + "/" + fork.Name,
-				ForkBranch:       pushEvent.Branch(),
-				ForkIsEmpty:      forkIsEmpty,
-			}
-			if patches, err := getDiffBetweenUpstreamAndFork(mc); err == nil {
-				var filePatches []diff.FilePatch
-
-				for _, patch := range patches {
-					filePatches = append(filePatches, patch.FilePatches()...)
-				}
-				if err = processMerge(mc, filePatches); err == nil {
-					pushFork(mc, access)
-				} else {
-					log.Printf("failed to process merge of %s into %s: %v", mc.UpstreamName, mc.ForkName, err)
-				}
-			} else {
-				log.Printf("failed to compute upstream and fork diff: %v", err)
-			}
-		}
-	}
-}
-
-// webhookHandler handles incoming webhook requests, specifically for push events.
-// The function reads the request body, parses the push event, and processes it.
-// Any errors in reading or parsing are logged and result in a bad request response.
-// After processing the push event, a log confirmation is made.
-func webhookHandler(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		errorapi.HandleError(w, errorapi.ErrRequestReadError)
-		return
-	}
-
-	pushEvent, err := api.ParsePushHook(body)
-
-	if err != nil {
-		errorapi.HandleError(w, errorapi.ErrRequestReadError)
-		return
-	}
-
-	// Process the push event, including finding forks and pulling changes
-	processPushEvent(pushEvent, access)
-
-	log.Printf("OK")
-}
-
 func createUser(giteaBaseURL, adminUsername, adminPassword, username, password, email string) (bool, *errorapi.APIError) {
 	/*
 			user := giteaAPI.CreateUserOption{
@@ -1434,19 +1384,53 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println("Received Repo Data:", options)
 	if repository, err := createRepoForUser(access.URL, access.Username, access.Password, options.Owner, options.Name, options.Description, options.Private); err == nil {
-		if err := createWebhook(access.URL, access.Username, access.Password, options.Owner, options.Name, fullname); err == nil {
-			remoteUrl := getRemoteUrlFromRepo(repository)
-			w.WriteHeader(http.StatusCreated)
-			w.Write([]byte(remoteUrl))
-		} else {
-			errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Webhook creation failed with error: %v", err)))
-		}
+		remoteUrl := getRemoteUrlFromRepo(repository)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(remoteUrl))
 	} else {
 		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Repo creation failed: %v", err)))
 	}
 }
 
-func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) ([]byte, *errorapi.APIError) {
+func listReposForUser(giteaBaseURL, adminUsername, adminPassword, owner string) ([]api.Repository, *errorapi.APIError) {
+	// Build the Gitea API URL for fetching the repo details
+	url := fmt.Sprintf("%s/users/%s/repos", giteaBaseURL, owner)
+
+	// Create a new request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
+	}
+	defer resp.Body.Close()
+
+	// Check if the request was successful
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Status returned was not OK: %d", resp.StatusCode))
+	}
+
+	// Read the response body from Gitea into a byte slice
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Error reading Gitea response %v", err))
+	}
+
+	var repoList []api.Repository
+	err = json.Unmarshal(bodyBytes, &repoList)
+	if err != nil {
+		return nil, errorapi.WrapError(errorapi.ErrRequestParseError, err.Error())
+	}
+
+	return repoList, nil
+}
+
+func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) (*api.Repository, *errorapi.APIError) {
 
 	// Build the Gitea API URL for fetching the repo details
 	url := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repoName)
@@ -1477,7 +1461,14 @@ func getRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName 
 		return nil, errorapi.WrapError(errorapi.ErrResponseReadError, err.Error())
 	}
 
-	return bodyBytes, nil
+	var repository api.Repository
+	err = json.Unmarshal(bodyBytes, &repository)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
+	}
+
+	return &repository, nil
 }
 
 func downloadRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, treeishId, path string) ([]byte, *errorapi.APIError) {
@@ -1586,63 +1577,101 @@ func handlePatchRepo(w http.ResponseWriter, r *http.Request) {
 func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	repoName := r.URL.Query().Get("name")
 	owner := r.URL.Query().Get("owner")
-	if repoName == "" || owner == "" {
-		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Repo name and owner must be provided"))
+	if owner == "" {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Owner must be provided"))
 		return
 	}
-	if resp, err := getRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
-		w.WriteHeader(http.StatusOK)
-		w.Write(resp)
+	if repoName == "" {
+		if repos, err := listReposForUser(access.URL, access.Username, access.Password, owner); err == nil {
+			jsonData, _ := json.Marshal(repos)
+			w.WriteHeader(http.StatusOK)
+			w.Write(jsonData)
+		} else {
+			errorapi.HandleError(w, errorapi.WrapError(err, "repo list generation failed"))
+		}
 	} else {
-		errorapi.HandleError(w, errorapi.WrapError(err, "Error getting repo for user"))
+		if repo, err := getRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
+			jsonData, _ := json.Marshal(*repo)
+			w.WriteHeader(http.StatusOK)
+			w.Write(jsonData)
+		} else {
+			errorapi.HandleError(w, errorapi.WrapError(err, "Error getting repo for user"))
+		}
 	}
 }
 
-func getRepoFileSHA(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) (string, error) {
+func getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) ([]api.ContentsResponse, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", giteaBaseURL, owner, repoName, path, ref)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading Gitea response %v", err)
-		return "", err
-	}
-	var contentsResponse api.ContentsResponse
-	err = json.Unmarshal(bodyBytes, &contentsResponse)
-	if err != nil {
-		log.Printf("Error reading Gitea response %v", err)
-		return "", err
+		return nil, err
 	}
 
-	return contentsResponse.SHA, nil
+	var contentsResponse []api.ContentsResponse
+	err = json.Unmarshal(bodyBytes, &contentsResponse)
+	if err != nil {
+		var single api.ContentsResponse
+		err = json.Unmarshal(bodyBytes, &single)
+		if err == nil {
+			contentsResponse = []api.ContentsResponse{single}
+		} else {
+			log.Printf("Error reading Gitea response %v", err)
+			return nil, err
+		}
+	}
+
+	return contentsResponse, nil
 }
 
 func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, branch, message string, files []*api.ChangeFileOperation) (string, *errorapi.APIError) {
 	// Build the Gitea API URL for downloading the repo archive
 	url := fmt.Sprintf("%s/repos/%s/%s/contents", giteaBaseURL, owner, repoName)
 
+	var actualFiles []*api.ChangeFileOperation
+
 	for _, file := range files {
-		if file.Operation != "create" {
-			sha, err := getRepoFileSHA(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
+		if file.Operation == "create" {
+			actualFiles = append(actualFiles, file)
+		} else {
+			// Multiple files may be returned in the case of deleting a directory path
+			repoFiles, err := getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
 			if err != nil {
 				return "", errorapi.WrapError(errorapi.ErrInternalServerError, fmt.Sprintf("Error getting SHA of '%v' from Gitea %v", file.Path, err))
 			}
-			file.SHA = sha
+			if len(repoFiles) > 1 {
+				if file.Operation != "delete" {
+					log.Printf("Multiple files returned for path %s, cannot update a directory directly", file.Path)
+					return "", errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Cannot update directory %s directly", file.Path))
+				}
+				for _, repoFile := range repoFiles {
+					actualFiles = append(actualFiles, &api.ChangeFileOperation{
+						Operation: file.Operation,
+						Path:      repoFile.Path,
+						SHA:       repoFile.SHA,
+					})
+				}
+			} else {
+				file.SHA = repoFiles[0].SHA
+				actualFiles = append(actualFiles, file)
+			}
 		}
 	}
 
@@ -1653,10 +1682,11 @@ func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, r
 			Committer:  api.Identity{Name: adminUsername},
 			Message:    message,
 		},
-		Files: files,
+		Files: actualFiles,
 	}
 
-	jsonData, _ := json.Marshal(data)
+	jsonData, _ := json.MarshalIndent(data, "", "	")
+	log.Printf("%s", jsonData)
 
 	// Build request
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -1730,7 +1760,49 @@ func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		errorapi.HandleError(w, err)
 	}
+}
 
+func deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) *errorapi.APIError {
+
+	// Build the Gitea API URL for fetching the repo details
+	url := fmt.Sprintf("%s/repos/%s/%s", giteaBaseURL, owner, repoName)
+
+	// Create a new request
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		log.Printf("Error deleting repo from Gitea %v", resp.StatusCode)
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("repo deletion failed with status code: %d", resp.StatusCode))
+	}
+
+	return nil
+}
+
+func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+
+	if repoName == "" || owner == "" {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Repo name and owner must be provided"))
+		return
+	}
+	if err := deleteRepoForUser(access.URL, access.Username, access.Password, owner, repoName); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Successfully deleted repository"))
+	} else {
+		errorapi.HandleError(w, errorapi.WrapError(err, "repo deletion failed"))
+	}
 }
 
 func handleRepo(w http.ResponseWriter, r *http.Request) {
@@ -1741,6 +1813,8 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 		handleGetRepo(w, r)
 	case http.MethodPatch:
 		handlePatchRepo(w, r)
+	case http.MethodDelete:
+		handleDeleteRepo(w, r)
 	default:
 		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrMethodNotAllowed, r.Method))
 	}
@@ -2030,6 +2104,7 @@ func handleCreateFork(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(remoteUrl))
 		} else {
 			errorapi.HandleError(w, errorapi.WrapError(err, "Repo Creation Failed"))
+			deleteRepoForUser(access.URL, access.Username, access.Password, options.NewOwner, options.Repo)
 		}
 	} else {
 		errormsg := "Repo creation failed: "
@@ -2163,7 +2238,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if options.OrgName == "" {
-		errorapi.HandleError(w, erroarpi.WrapError(errorapi.ErrBadRequest, "name must be provided"))
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "orgname must be provided"))
 		return
 	}
 
@@ -2180,10 +2255,62 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func deleteOrg(giteaBaseURL, adminUsername, adminPassword, orgName string, purge bool) *errorapi.APIError {
+	if purge {
+		repos, err := listReposForUser(giteaBaseURL, adminUsername, adminPassword, orgName)
+		if err != nil {
+			return errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
+		}
+		for _, repository := range repos {
+			deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, orgName, repository.Name)
+		}
+	}
+
+	req, err := http.NewRequest("DELETE", giteaBaseURL+"/orgs/"+orgName, nil)
+	if err != nil {
+		return errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
+	}
+
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("failed to delete organization; HTTP status code: %d", resp.StatusCode))
+	}
+
+	return nil
+}
+
+func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("org_name")
+	purge := r.URL.Query().Get("purge") == "true"
+
+	if name == "" {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Org name must be provided as org_name"))
+		return
+	}
+
+	if err := deleteOrg(access.URL, access.Username, access.Password, name, purge); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Successfully deleted org"))
+	} else {
+		log.Printf("failed to delete org %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		errorapi.HandleError(w, errorapi.WrapError(err, "failed to delete org"))
+	}
+}
+
 func handleOrg(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		handleCreateOrg(w, r)
+	case http.MethodDelete:
+		handleDeleteOrg(w, r)
 	case http.MethodGet:
 		handleGetOrg(w, r)
 	default:
@@ -2282,26 +2409,46 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 
 // main initializes an HTTP server with endpoints for processing push events,
 // checking service readiness, and determining service liveness. The server
-// listens on port 8900. Logging is utilized to indicate the server's start
+// listens on port 9000. Logging is utilized to indicate the server's start
 // and to capture any fatal errors.
 func main() {
-	//mux := http.NewServeMux()
-	r := mux.NewRouter()
-	r.HandleFunc("/onPush", webhookHandler)
-	r.HandleFunc("/users", handleUser)
-	r.HandleFunc("/users/ssh", handleUserSsh)
-	r.HandleFunc("/repos", handleRepo)
-	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
-	r.HandleFunc("/repos/hooks", handleRepoHook)
-	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
-	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
-	r.HandleFunc("/forks", handleFork)
-	r.HandleFunc("/orgs", handleOrg)
-	r.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
-	r.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
-	r.HandleFunc("/readiness", readinessHandler)
-	r.HandleFunc("/liveness", livenessHandler)
-	http.Handle("/", r)
+	router := mux.NewRouter()
+	router.Use(AuthMiddleware)
+
+	router.HandleFunc("/users", handleUser)
+	router.HandleFunc("/users/ssh", handleUserSsh)
+	router.HandleFunc("/repos", handleRepo)
+	router.HandleFunc("/repos/collaborators", handleRepoCollaborator)
+	router.HandleFunc("/repos/hooks", handleRepoHook)
+	router.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
+	router.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+	router.HandleFunc("/forks", handleFork)
+	router.HandleFunc("/orgs", handleOrg)
+	router.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
+	router.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
+	router.HandleFunc("/readiness", readinessHandler)
+	router.HandleFunc("/liveness", livenessHandler)
+
+	srv := &http.Server{
+		Handler:      router,
+		Addr:         "127.0.0.1:9000",
+		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  15 * time.Second,
+	}
+
 	log.Println("Server started on :9000")
-	log.Fatal(http.ListenAndServe(":9000", nil))
+	go func() {
+		err := srv.ListenAndServe()
+		log.Fatalf(err.Error())
+	}()
+
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	<-shutdown
+
+	//Shutdown gracefully
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	defer cancel()
+	log.Print("Received shutdown signal closing server ...")
+	srv.Shutdown(ctx)
 }
