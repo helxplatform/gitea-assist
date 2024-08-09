@@ -35,7 +35,7 @@ var (
 	ErrGiteaConnectError   = &APIError{error: errors.New("error connecting to gitea"), status: http.StatusBadRequest}
 	ErrUnauthorized        = &APIError{error: errors.New("unauthorized attempt to login"), status: http.StatusUnauthorized}
 	// Making a slice for all predefined errors for ease of comparison in HandleError below
-	allErrors = []APIError{*ErrBadRequest, *ErrNotFound, *ErrInternalServerError, *ErrRequestReadError, *ErrMethodNotAllowed, *ErrRequestParseError}
+	allErrors = []*APIError{ErrBadRequest, ErrNotFound, ErrInternalServerError, ErrRequestReadError, ErrMethodNotAllowed, ErrRequestParseError}
 )
 
 // This function provides capability to "modify" the message of an existing error
@@ -50,11 +50,12 @@ func WrapError(e *APIError, msg string) *APIError {
 
 func HandleError(w http.ResponseWriter, err *APIError) {
 	for _, sperr := range allErrors {
-		if err.Compare(sperr) {
+		if err.Compare(*sperr) {
 			http.Error(w, err.Error(), err.status)
 			log.Printf("ERROR:: %s STATUS:: %d\n", err.Error(), err.status)
 			return
 		}
 	}
 	http.Error(w, ErrInternalServerError.Error(), ErrInternalServerError.status)
+	log.Println("Unknown error occured")
 }
