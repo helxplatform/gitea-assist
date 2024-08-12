@@ -35,7 +35,7 @@ var (
 	ErrGiteaConnectError   = &APIError{error: errors.New("error connecting to gitea"), status: http.StatusBadRequest}
 	ErrUnauthorized        = &APIError{error: errors.New("unauthorized attempt to login"), status: http.StatusUnauthorized}
 	// Making a slice for all predefined errors for ease of comparison in HandleError below
-	allErrors = []*APIError{ErrBadRequest, ErrNotFound, ErrInternalServerError, ErrRequestReadError, ErrMethodNotAllowed, ErrRequestParseError, ErrUnauthorized}
+	allErrors = []*APIError{ErrBadRequest, ErrNotFound, ErrInternalServerError, ErrRequestReadError, ErrResponseReadError, ErrMethodNotAllowed, ErrRequestParseError, ErrMethodNotAllowed, ErrGiteaConnectError, ErrUnauthorized}
 )
 
 // This function provides capability to "modify" the message of an existing error
