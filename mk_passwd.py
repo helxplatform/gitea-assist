@@ -6,7 +6,7 @@ import string
 import argparse
 
 # Argument parser setup
-parser = argparse.ArgumentParser(description="Create a Kubernetes secret with a random or predefined password and username.")
+parser = argparse.ArgumentParser(description="Create a Kubernetes secret with a random or predefined gitea password, username and gitea-assist auth token.")
 parser.add_argument('--password', type=str, help='Predefined password to use. If not provided, a random password will be generated.')
 parser.add_argument('--username', type=str, default='gitea_admin', help='Username to use. Defaults to "gitea_admin".')
 parser.add_argument('--token', type=str, help='Gitea-Assist token for Authentication Bearer [token] exchange with the API itself.')
