@@ -2471,26 +2471,6 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 // listens on port 9000. Logging is utilized to indicate the server's start
 // and to capture any fatal errors.
 func main() {
-<<<<<<< HEAD
-	//mux := http.NewServeMux()
-	r := mux.NewRouter()
-	r.HandleFunc("/onPush", webhookHandler)
-	r.HandleFunc("/users", handleUser)
-	r.HandleFunc("/users/ssh", handleUserSsh)
-	r.HandleFunc("/repos", handleRepo)
-	r.HandleFunc("/repos/collaborators", handleRepoCollaborator)
-	r.HandleFunc("/repos/hooks", handleRepoHook)
-	r.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
-	r.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
-	r.HandleFunc("/repos/commits", handleListCommits).Methods("GET")
-	r.HandleFunc("/forks", handleFork)
-	r.HandleFunc("/orgs", handleOrg)
-	r.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
-	r.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
-	r.HandleFunc("/readiness", readinessHandler)
-	r.HandleFunc("/liveness", livenessHandler)
-	http.Handle("/", r)
-=======
 	router := mux.NewRouter()
 	// All protected routes must use AuthMiddleware
 	protected := router.PathPrefix("/").Subrouter()
@@ -2503,6 +2483,7 @@ func main() {
 	protected.HandleFunc("/repos/hooks", handleRepoHook)
 	protected.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
 	protected.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+	protected.HandleFunc("/repos/commits", handleListCommits).Methods("GET")
 	protected.HandleFunc("/forks", handleFork)
 	protected.HandleFunc("/orgs", handleOrg)
 	protected.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
@@ -2518,7 +2499,6 @@ func main() {
 		ReadTimeout:  15 * time.Second,
 	}
 
->>>>>>> 166f0a2f3eb0850f234daff7858c8f346f1d256a
 	log.Println("Server started on :9000")
 	go func() {
 		err := srv.ListenAndServe()
