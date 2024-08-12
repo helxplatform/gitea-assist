@@ -32,6 +32,12 @@ Ensure these files are present and contain the necessary credentials for accessi
 - `/onPush`: Endpoint to receive Gitea push webhooks.
 - `/readiness`: A readiness endpoint that returns 200 OK, indicating the service is ready to handle requests.
 - `/liveness`: A liveness endpoint that returns 200 OK, indicating the service is alive and healthy.
+- `/users`: Endpoint to handle users in Gitea instance
+- `/users/ssh`: Endpoint to manage ssh keys for Gitea
+- `/repos`: Endpoint to manage repo list
+	
+An example curl command needed to hit any of the endpoints is:
+`curl -H "Authorization: Bearer <assist-token_from_secret>" -X GET "http://<server_ip>:9000/users?username=<user_name>"`
 
 ## Running the Application
 
