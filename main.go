@@ -2413,19 +2413,22 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 // and to capture any fatal errors.
 func main() {
 	router := mux.NewRouter()
-	router.Use(AuthMiddleware)
+	// All protected routes must use AuthMiddleware
+	protected := router.PathPrefix("/").Subrouter()
+	protected.Use(AuthMiddleware)
 
-	router.HandleFunc("/users", handleUser)
-	router.HandleFunc("/users/ssh", handleUserSsh)
-	router.HandleFunc("/repos", handleRepo)
-	router.HandleFunc("/repos/collaborators", handleRepoCollaborator)
-	router.HandleFunc("/repos/hooks", handleRepoHook)
-	router.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
-	router.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
-	router.HandleFunc("/forks", handleFork)
-	router.HandleFunc("/orgs", handleOrg)
-	router.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
-	router.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
+	protected.HandleFunc("/users", handleUser)
+	protected.HandleFunc("/users/ssh", handleUserSsh)
+	protected.HandleFunc("/repos", handleRepo)
+	protected.HandleFunc("/repos/collaborators", handleRepoCollaborator)
+	protected.HandleFunc("/repos/hooks", handleRepoHook)
+	protected.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
+	protected.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+	protected.HandleFunc("/forks", handleFork)
+	protected.HandleFunc("/orgs", handleOrg)
+	protected.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
+	protected.HandleFunc("/orgs/{orgName}/members/{userName}", handleAddMember).Methods("PUT")
+	// The router routes will not use the auth middleware
 	router.HandleFunc("/readiness", readinessHandler)
 	router.HandleFunc("/liveness", livenessHandler)
 
