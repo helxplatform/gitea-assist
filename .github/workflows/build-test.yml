@@ -3,8 +3,8 @@ on:
   push:
   workflow_dispatch:
 
-    
+
 jobs:
   build-test:
-    uses: helxplatform/helx-github-actions/.github/workflows/build-test.yml@testforgittea
+    uses: helxplatform/helx-github-actions/.github/workflows/build-test.yml@main
     secrets: inherit
