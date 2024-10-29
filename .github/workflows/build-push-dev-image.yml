@@ -1,7 +1,5 @@
 # Workflow responsible for the 
 # development release processes.
-
-
 name: Build-Push-Dev-Image
 on:
   push:
