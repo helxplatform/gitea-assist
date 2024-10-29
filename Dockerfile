@@ -9,7 +9,7 @@ WORKDIR /app
 COPY . .
 
 # Build the Go application
-RUN go build -o assistant
+RUN go build -o ${BINARY_NAME}
 
 # Using a multi-stage build
 FROM alpine:3.18
