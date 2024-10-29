@@ -1,7 +1,7 @@
 # Use the official Golang image to build the binary
 FROM golang:1.23 AS build
 ENV CGO_ENABLED=0
-
+ARG BINARY_NAME
 # Set the working directory
 WORKDIR /app
 
