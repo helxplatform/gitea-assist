@@ -9,7 +9,8 @@ WORKDIR /app
 COPY . .
 
 # Build the Go application
-RUN go build -o ${BINARY_NAME}
+# RUN go build -o ${BINARY_NAME}
+RUN make build
 # RUN go build -o assistant
 
 # Using a multi-stage build
