@@ -28,7 +28,6 @@ docker-build: build
 	@echo "Building Docker container..."
 		docker build \
 	--platform=linux/amd64 \
-	--build-arg=BINARY_NAME=$(BINARY_NAME) \
 	--tag=$(REGISTRY_NAME)/$(CONTAINER_NAME) \
 	.
 
