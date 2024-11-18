@@ -1,7 +1,5 @@
 # Workflow responsible for the 
 # major release processes.
-#
-
 name: Build-Push-Release
 on:
   push:
