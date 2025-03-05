@@ -22,13 +22,22 @@ The application reads Gitea credentials from the following files:
 - `/etc/assist-secret/gitea-username` for the username.
 - `/etc/assist-secret/gitea-password` for the password.
 
-Ensure these files are present and contain the necessary credentials for accessing Gitea repositories.
+The application expects a Bearer Token for use of gitea functionality which is supplied by:
+- `/etc/assist-secret/assist-token` for the assist auth token.
+
+Ensure these files are present and contain the necessary credentials for accessing Gitea repositories. These can be created by using the mk_passwd.py script
 
 ## Endpoints
 
 - `/onPush`: Endpoint to receive Gitea push webhooks.
 - `/readiness`: A readiness endpoint that returns 200 OK, indicating the service is ready to handle requests.
 - `/liveness`: A liveness endpoint that returns 200 OK, indicating the service is alive and healthy.
+- `/users`: Endpoint to handle users in Gitea instance
+- `/users/ssh`: Endpoint to manage ssh keys for Gitea
+- `/repos`: Endpoint to manage repo list
+	
+An example curl command needed to hit any of the endpoints is:
+`curl -H "Authorization: Bearer <assist-token_from_secret>" -X GET "http://<server_ip>:9000/users?username=<user_name>"`
 
 ## Running the Application
 
@@ -49,7 +58,7 @@ However, you can specify custom values for both.
 
 ### Usage
 
-- **Default (random password, `gitea_admin` username):**
+- **Default (random password, `gitea_admin` username and `assist-token`):**
   ```
   ./mk_passwd.py
   ```
@@ -64,9 +73,9 @@ However, you can specify custom values for both.
   ./mk_passwd.py --username <your_predefined_username>
   ```
 
-- **Specify both password and username:**
+- **Specify both password, username and token:**
   ```
-  ./mk_passwd.py --password <your_predefined_password> --username <your_predefined_username>
+  ./mk_passwd.py --password <your_predefined_password> --username <your_predefined_username> --token <your_predefined_token>
   ```
 
 ### Behavior
