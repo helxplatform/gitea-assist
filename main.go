@@ -1809,7 +1809,7 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 	branch := r.URL.Query().Get("branch")
 
 	if repoName == "" || owner == "" || branch == "" {
-		http.Error(w, "Repo name, owner, and branch must be provided", http.StatusBadRequest)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Repo name, owner, and branch must be provided"))
 		return
 	}
 	if commits, err := listCommitsForUser(access.URL, access.Username, access.Password, owner, repoName, branch); err == nil {
