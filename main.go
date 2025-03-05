@@ -1762,6 +1762,65 @@ func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func listCommitsForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName, branch string) ([]api.Commit, *errorapi.APIError) {
+	// Build the Gitea API URL for downloading the repo archive
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?sha=%s&files=false", giteaBaseURL, owner, repoName, branch)
+
+	// Build request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request %v", http.StatusInternalServerError)
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
+	}
+	req.SetBasicAuth(string(adminUsername), string(adminPassword))
+
+	// Send request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error querying Gitea %v", http.StatusInternalServerError)
+		return nil, errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error listing commits from Gitea %v", resp.StatusCode)
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("listing commits failed with status code: %d", resp.StatusCode))
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, errorapi.WrapError(errorapi.ErrRequestReadError, err.Error())
+	}
+
+	var commits []api.Commit
+	err = json.Unmarshal(bodyBytes, &commits)
+	if err != nil {
+		log.Printf("Error reading Gitea response %v", err)
+		return nil, errorapi.WrapError(errorapi.ErrRequestParseError, err.Error())
+	}
+
+	return commits, nil
+}
+
+func handleListCommits(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+	branch := r.URL.Query().Get("branch")
+
+	if repoName == "" || owner == "" || branch == "" {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Repo name, owner, and branch must be provided"))
+		return
+	}
+	if commits, err := listCommitsForUser(access.URL, access.Username, access.Password, owner, repoName, branch); err == nil {
+		jsonData, _ := json.Marshal(commits)
+		w.WriteHeader(http.StatusOK)
+		w.Write(jsonData)
+	} else {
+		errorapi.HandleError(w, errorapi.WrapError(err, "failed to list commits for repo"))
+	}
+}
+
 func deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) *errorapi.APIError {
 
 	// Build the Gitea API URL for fetching the repo details
@@ -2424,6 +2483,7 @@ func main() {
 	protected.HandleFunc("/repos/hooks", handleRepoHook)
 	protected.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
 	protected.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+	protected.HandleFunc("/repos/commits", handleListCommits).Methods("GET")
 	protected.HandleFunc("/forks", handleFork)
 	protected.HandleFunc("/orgs", handleOrg)
 	protected.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
