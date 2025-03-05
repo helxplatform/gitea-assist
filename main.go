@@ -1601,7 +1601,7 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) ([]api.ContentsResponse, *errorapi.APIError) {
+func getRepoFiles(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) ([]api.ContentsResponse, *errorapi.APIError) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", giteaBaseURL, owner, repoName, path)
 	if ref != "" {
 		// If not specified, defaults to the head of the default branch.
@@ -1665,7 +1665,7 @@ func modifyRepoFilesForUser(giteaBaseURL, adminUsername, adminPassword, owner, r
 			actualFiles = append(actualFiles, file)
 		} else {
 			// Multiple files may be returned in the case of deleting a directory path
-			repoFiles, err := getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
+			repoFiles, err := getRepoFiles(giteaBaseURL, adminUsername, adminPassword, owner, repoName, file.Path, "")
 			if err != nil {
 				return "", errorapi.WrapError(errorapi.ErrInternalServerError, fmt.Sprintf("Error getting SHA of '%v' from Gitea %v", file.Path, err))
 			}
@@ -1785,7 +1785,7 @@ func handleDownloadRepoFile(w http.ResponseWriter, r *http.Request) {
 		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Repo name, owner, and path must be provided"))
 		return
 	}
-	repoFile, err := getRepoFile(access.URL, access.Username, access.Password, owner, repoName, path, treeishId)
+	repoFile, err := getRepoFiles(access.URL, access.Username, access.Password, owner, repoName, path, treeishId)
 	if err != nil {
 		errorapi.HandleError(w, err)
 		return
