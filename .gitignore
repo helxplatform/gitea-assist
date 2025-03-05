@@ -1,3 +1,4 @@
 assistant
 *.tgz
 tmp
+.DS_Store

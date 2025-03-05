@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	errorapi "gitea_assist/error"
@@ -1600,31 +1601,43 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) ([]api.ContentsResponse, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", giteaBaseURL, owner, repoName, path, ref)
+func getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, path, ref string) ([]api.ContentsResponse, *errorapi.APIError) {
+	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", giteaBaseURL, owner, repoName, path)
+	if ref != "" {
+		// If not specified, defaults to the head of the default branch.
+		url = fmt.Sprintf("%s?ref=%s", url, ref)
+	}
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrBadRequest, err.Error())
 	}
 
 	req.SetBasicAuth(string(adminUsername), string(adminPassword))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrGiteaConnectError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP Error: %d", resp.StatusCode)
+		var errapi *errorapi.APIError
+		if resp.StatusCode == 404 {
+			errapi = errorapi.WrapError(errorapi.ErrNotFound, fmt.Sprintf("file does not exist in repo: %s", path))
+		} else {
+			errapi = errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("downloading content of file in user repo returned unexpected status: %d", resp.StatusCode))
+		}
+		return nil, errapi
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading Gitea response %v", err)
-		return nil, err
+		return nil, errorapi.WrapError(errorapi.ErrRequestReadError, err.Error())
 	}
 
+	// Not documented but this endpoint can return either a single ContentsResponse as its response or an array of them.
 	var contentsResponse []api.ContentsResponse
 	err = json.Unmarshal(bodyBytes, &contentsResponse)
 	if err != nil {
@@ -1634,7 +1647,7 @@ func getRepoFile(giteaBaseURL, adminUsername, adminPassword, owner, repoName, pa
 			contentsResponse = []api.ContentsResponse{single}
 		} else {
 			log.Printf("Error reading Gitea response %v", err)
-			return nil, err
+			return nil, errorapi.WrapError(errorapi.ErrResponseReadError, err.Error())
 		}
 	}
 
@@ -1760,6 +1773,39 @@ func handleDownloadRepo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		errorapi.HandleError(w, err)
 	}
+}
+
+func handleDownloadRepoFile(w http.ResponseWriter, r *http.Request) {
+	repoName := r.URL.Query().Get("name")
+	owner := r.URL.Query().Get("owner")
+	treeishId := r.URL.Query().Get("treeish_id")
+	path := r.URL.Query().Get("path")
+
+	if repoName == "" || owner == "" || path == "" {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, "Repo name, owner, and path must be provided"))
+		return
+	}
+	repoFile, err := getRepoFile(access.URL, access.Username, access.Password, owner, repoName, path, treeishId)
+	if err != nil {
+		errorapi.HandleError(w, err)
+		return
+	}
+
+	if len(repoFile) > 1 {
+		log.Printf("Multiple files returned for path %s, cannot download a directory directly", path)
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Cannot download a directory %s directly", path)))
+		return
+	}
+
+	base64FileContent := repoFile[0].Content
+	fileContent, b64err := base64.StdEncoding.DecodeString(*base64FileContent)
+	if err != nil {
+		errorapi.HandleError(w, errorapi.WrapError(errorapi.ErrBadRequest, fmt.Sprintf("Could not decode file contents as base64: %d", b64err)))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(fileContent)
 }
 
 func deleteRepoForUser(giteaBaseURL, adminUsername, adminPassword, owner, repoName string) *errorapi.APIError {
@@ -2424,6 +2470,7 @@ func main() {
 	protected.HandleFunc("/repos/hooks", handleRepoHook)
 	protected.HandleFunc("/repos/modify", handleModifyRepoFiles).Methods("POST")
 	protected.HandleFunc("/repos/download", handleDownloadRepo).Methods("GET")
+	protected.HandleFunc("/repos/contents", handleDownloadRepoFile).Methods("GET")
 	protected.HandleFunc("/forks", handleFork)
 	protected.HandleFunc("/orgs", handleOrg)
 	protected.HandleFunc("/orgs/{orgName}/members", handleGetMembers).Methods("GET")
